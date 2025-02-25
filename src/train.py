@@ -15,15 +15,23 @@ import json
 import argparse
 import math
 import logging
+from collections import defaultdict
+from typing import Dict
 
+import torch
+import torch.nn as nn
 
 from transformers import (
     AutoTokenizer,
     set_seed,
     TrainingArguments,
+    Trainer,
 )
 from datasets import load_dataset
 import yaml
+import mlflow
+from torch.utils.data import DataLoader
+from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 
 # Import our MoE model
 from expert_model import MoELanguageModel
@@ -48,7 +56,6 @@ logger = logging.getLogger(__name__)
 
 def setup_mlflow(config):
     """Setup MLflow tracking based on config"""
-    import mlflow
     from mlflow.system_metrics import enable_system_metrics_logging
 
     mlflow_config = config.get("logging", {}).get("mlflow", {})
@@ -167,24 +174,6 @@ def config_to_args(config):
         "tensorboard_log_dir": "runs/",
     }
 
-    # # Set defaults
-    # for key, value in defaults.items():
-    #     setattr(args, key, value)
-
-    # # Override with config values
-    # for key, value in config.items():
-    #     if key == "training":
-    #         for train_key, train_value in value.items():
-    #             setattr(args, train_key, train_value)
-    #     elif key == "model":
-    #         for model_key, model_value in value.items():
-    #             setattr(args, model_key, model_value)
-    #     elif key == "data":
-    #         for data_key, data_value in value.items():
-    #             setattr(args, data_key, data_value)
-    #     else:
-    #         setattr(args, key, value)
-
     # Set defaults
     for key, value in defaults.items():
         setattr(args, key, value)
@@ -211,6 +200,104 @@ def config_to_args(config):
             setattr(args, key, value)
 
     return args
+
+
+def validate_config(config: dict) -> None:
+    """Validate configuration parameters"""
+    required_sections = ["model", "data", "training"]
+    for section in required_sections:
+        if section not in config:
+            raise ValueError(f"Missing required section: {section}")
+            
+    # Validate model config
+    model_config = config["model"]
+    required_model_params = ["d_model", "n_layers", "num_experts", "num_heads"]
+    for param in required_model_params:
+        if param not in model_config:
+            raise ValueError(f"Missing required model parameter: {param}")
+            
+    # Validate data config
+    data_config = config["data"]
+    if not data_config.get("dataset_name") and not data_config.get("train_file"):
+        raise ValueError("Either dataset_name or train_file must be specified")
+        
+    # Validate training config
+    training_config = config["training"]
+    required_training_params = [
+        "output_dir", "per_device_train_batch_size", 
+        "learning_rate", "num_train_epochs"
+    ]
+    for param in required_training_params:
+        if param not in training_config:
+            raise ValueError(f"Missing required training parameter: {param}")
+
+
+class ExpertMonitor:
+    def __init__(self):
+        self.expert_usage = defaultdict(int)
+        self.expert_loss = defaultdict(float)
+        self.domain_metrics = defaultdict(lambda: defaultdict(float))
+        self.total_tokens = 0
+        
+    def update(self, router_logits: torch.Tensor, loss: torch.Tensor, model: nn.Module):
+        with torch.no_grad():
+            # Existing metrics update
+            expert_assignments = router_logits.argmax(dim=-1)
+            for expert_idx in range(router_logits.shape[-1]):
+                self.expert_usage[expert_idx] += (expert_assignments == expert_idx).sum().item()
+            self.total_tokens += router_logits.numel()
+            
+            # Track domain-specific metrics - fixed to access experts properly
+            if hasattr(model, 'layers') and model.layers:
+                for layer_idx, layer in enumerate(model.layers):
+                    if len(layer) >= 3 and hasattr(layer[2], 'experts'):
+                        moe_layer = layer[2]
+                        for expert_idx, expert in enumerate(moe_layer.experts):
+                            if hasattr(expert, 'expert_type'):
+                                domain_type = expert.expert_type
+                                self.domain_metrics[domain_type]["usage"] += self.expert_usage[expert_idx]
+                                if hasattr(expert, "activation_patterns"):
+                                    self.domain_metrics[domain_type]["activation"] = (
+                                        expert.activation_patterns.mean().item()
+                                    )
+                                if hasattr(expert, "domain_loss"):
+                                    self.domain_metrics[domain_type]["loss"] = expert.domain_loss.item()
+                    
+    def get_metrics(self):
+        metrics = {}
+        
+        # Expert usage metrics
+        for expert_idx, count in self.expert_usage.items():
+            metrics[f"expert_{expert_idx}_usage"] = count / self.total_tokens
+            
+        # Domain-specific metrics
+        for domain, domain_stats in self.domain_metrics.items():
+            for metric_name, value in domain_stats.items():
+                metrics[f"domain_{domain}_{metric_name}"] = (
+                    value / self.total_tokens if metric_name == "usage" else value
+                )
+                
+        return metrics
+
+
+def cleanup_resources():
+    """Clean up resources properly"""
+    try:
+        # Clear CUDA cache
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
+        # End MLflow run if active
+        if mlflow.active_run():
+            mlflow.end_run()
+            
+        # Close all file handles
+        for handler in logger.handlers[:]:
+            handler.close()
+            logger.removeHandler(handler)
+            
+    except Exception as e:
+        logger.error(f"Error during cleanup: {str(e)}")
 
 
 def main():
@@ -424,30 +511,15 @@ def main():
             args=training_args,
             train_dataset=datasets["train"],
             eval_dataset=datasets.get("validation", None),
-            processing_class=tokenizer,  # Use processing_class instead of tokenizer
+            tokenizer=tokenizer,  # Use tokenizer instead of processing_class
             expert_balance_importance=args.expert_balance_importance,
-            # data_collator=OptimizedDataCollator(tokenizer=tokenizer),
             data_collator=data_collator,
             use_mlflow=args.use_mlflow,
+            expert_monitor=ExpertMonitor()
         )
 
         # Train model
         if args.do_train:
-            # Ensure input tensors have correct dtype for embeddings
-            # def ensure_long_dtype(batch):
-            #     if isinstance(batch, dict):
-            #         return {
-            #             k: v.long() if k == "input_ids" or k == "labels" else v
-            #             for k, v in batch.items()
-            #         }
-            #     return batch
-
-            # Modify the data collator to ensure correct dtype
-            # original_collate = trainer.data_collator
-            # trainer.data_collator = lambda examples: ensure_long_dtype(
-            #     original_collate(examples)
-            # )
-
             logger.info("Starting train")
             train_result = trainer.train()
             logger.info("Saving Model")
@@ -478,12 +550,7 @@ def main():
         if args.do_eval:
             trainer.on_evaluate(args=training_args, state=None, control=None)
     finally:
-        # End MLflow run if active
-        if mlflow_run:
-            import mlflow
-
-            if mlflow.active_run():
-                mlflow.end_run()
+        cleanup_resources()
 
 
 if __name__ == "__main__":

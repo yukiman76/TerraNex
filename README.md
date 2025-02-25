@@ -1,9 +1,11 @@
-# HumanityHelper 
+# HumanityHelper
 
 ## Goal
+
 To build an open-source, lightweight language model that enables the wider community to run an intelligent AI assistant locally.
 
 ## Objectives
+
 - Leverage current language model (LLM/SLM) architectures and training techniques
 - Utilize a mixture of experts approach with 3-5 specialized expert models (math, Science, ...)
 - Optimize the model to be computationally efficient, allowing it to run on consumer-grade hardware (GPU,CPU,Embeded)
@@ -12,6 +14,7 @@ To build an open-source, lightweight language model that enables the wider commu
 - Engage the community to contribute to the model's ongoing development and improvement
 
 ## Milestones
+
 1. Research and select the most suitable LLM architecture and training approaches
 2. Design the mixture of experts system and define the specialties of each expert model
 3. Collect and preprocess diverse training data for each expert [DATA](DATA.md)

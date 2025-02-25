@@ -15,22 +15,20 @@ import numpy as np
 from transformers import Trainer
 import logging
 from scipy.stats import entropy
+from typing import Dict
+import mlflow
 
 logger = logging.getLogger(__name__)
 
 
 class ExpertBalancingTrainer(Trainer):
-    def __init__(self, *args, **kwargs):
-        # Extract custom parameters
-        self.expert_balance_importance = kwargs.pop("expert_balance_importance", 0.01)
-        self.use_mlflow = kwargs.pop("use_mlflow", False)
-
-        # Initialize parent class
+    def __init__(self, *args, expert_balance_importance=0.01, 
+                 use_mlflow=False, expert_monitor=None, **kwargs):
         super().__init__(*args, **kwargs)
-
-        # Initialize step tracking
-        self.last_logged_step = -1
-
+        self.expert_balance_importance = expert_balance_importance
+        self.use_mlflow = use_mlflow
+        self.expert_monitor = expert_monitor
+        
     def _calculate_balance_loss(self, router_logits):
         """Calculate expert balancing loss across all layers"""
         total_loss = 0.0
@@ -81,20 +79,18 @@ class ExpertBalancingTrainer(Trainer):
         index = np.arange(1, n + 1)
         return ((2 * index - n - 1) * values).sum() / (n * values.sum())
 
-    def compute_loss(
-        self, model, inputs, return_outputs=False, num_items_in_batch=None
-    ):
-        """Override compute_loss to add expert balancing loss"""
-        # Forward pass with router logits
-        outputs = model(
-            input_ids=inputs["input_ids"],
-            attention_mask=inputs.get("attention_mask", None),
-            labels=inputs.get("labels", None),
-            return_router_logits=True,
-        )
-
-        # Get main loss and router logits
+    def compute_loss(self, model, inputs, return_outputs=False):
+        outputs = model(**inputs, return_router_logits=True)
         loss = outputs.loss
+        
+        # Track expert usage with monitor if available
+        if self.expert_monitor and outputs.router_logits:
+            self.expert_monitor.update(
+                outputs.router_logits[0],  # Use first layer's router logits
+                loss, 
+                model
+            )
+        
         router_logits = outputs.router_logits
 
         # Calculate expert balancing loss
@@ -109,7 +105,6 @@ class ExpertBalancingTrainer(Trainer):
             # Calculate expert usage statistics
             expert_usages = self._calculate_expert_usage(router_logits)
 
-            print(loss.detach().cpu())
             # Prepare metrics dictionary
             metrics = {
                 "loss/cross_entropy": float(loss.detach().mean().cpu()),
@@ -126,38 +121,31 @@ class ExpertBalancingTrainer(Trainer):
 
             # Add overall balance metrics
             all_usages = np.array([usage for usage in expert_usages]).mean(axis=0)
-            metrics.update(
-                {
-                    "train/expert_balance/overall/variance": float(np.var(all_usages)),
-                    "train/expert_balance/overall/entropy": float(
-                        self._calculate_entropy(all_usages)
-                    ),
-                    "train/expert_balance/overall/gini": float(
-                        self._calculate_gini(all_usages)
-                    ),
-                }
-            )
+            metrics.update({
+                "train/expert_balance/overall/variance": float(np.var(all_usages)),
+                "train/expert_balance/overall/entropy": float(
+                    self._calculate_entropy(all_usages)
+                ),
+                "train/expert_balance/overall/gini": float(
+                    self._calculate_gini(all_usages)
+                ),
+            })
 
             # Log to both trainer and MLflow
             self._log_metrics(metrics, current_step)
 
         return (total_loss, outputs) if return_outputs else total_loss
 
-    def _log_metrics(self, metrics, step):
-        """Log metrics to both trainer and MLflow"""
-        # Log to trainer
-        for name, value in metrics.items():
-            self.log({name: value})
-
-        # Log to MLflow if enabled
-        if self.use_mlflow:
-            try:
-                import mlflow
-
-                if mlflow.active_run():
-                    mlflow.log_metrics(metrics, step=step)
-            except Exception as e:
-                logger.warning(f"Error logging to MLflow: {str(e)}")
+    def log_metrics(self, split: str, metrics: Dict[str, float]) -> None:
+        """Override to add domain-specific metric logging"""
+        super().log_metrics(split, metrics)
+        
+        if self.use_mlflow and mlflow.active_run():
+            # Log expert monitor metrics
+            if self.expert_monitor:
+                monitor_metrics = self.expert_monitor.get_metrics()
+                for name, value in monitor_metrics.items():
+                    mlflow.log_metric(f"{split}_{name}", value)
 
     def on_evaluate(self, args=None, state=None, control=None, **kwargs):
         """Perform final expert utilization analysis during evaluation"""
@@ -227,3 +215,18 @@ class ExpertBalancingTrainer(Trainer):
                     mlflow.log_metrics(final_metrics, step=self.state.global_step)
             except Exception as e:
                 logger.warning(f"Error logging final metrics to MLflow: {str(e)}")
+
+    def _log_metrics(self, metrics, step):
+        """Log metrics to both trainer and MLflow"""
+        # Log to trainer
+        for name, value in metrics.items():
+            self.log({name: value})
+            
+        # Log to MLflow if enabled
+        if self.use_mlflow:
+            try:
+                import mlflow
+                if mlflow.active_run():
+                    mlflow.log_metrics(metrics, step=step)
+            except Exception as e:
+                logger.warning(f"Error logging to MLflow: {str(e)}")

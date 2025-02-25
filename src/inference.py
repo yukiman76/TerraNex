@@ -11,6 +11,7 @@ Description: Script for loading and running inference with trained MoE models. H
 
 import argparse
 import torch
+import torch.nn.functional as F
 from transformers import AutoTokenizer
 from expert_model import MoELanguageModel
 from utils.device import setup_device

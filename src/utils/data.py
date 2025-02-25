@@ -61,27 +61,41 @@ class DataProcessor:
     def __init__(self, tokenizer: PreTrainedTokenizer, max_seq_length: int):
         self.tokenizer = tokenizer
         self.max_seq_length = max_seq_length
-
+        self.chunk_size = 1000  # Add chunk processing
+        
     def preprocess_function(self, examples):
-        """Preprocess function that can be pickled"""
-        # Handle single strings or lists
-        texts = examples["text"]
-        if isinstance(texts, str):
-            texts = [texts]
-
-        # Tokenize
-        tokenized = self.tokenizer(
-            texts,
-            truncation=True,
-            max_length=self.max_seq_length,
-            padding=False,
-            return_attention_mask=True,
-        )
-
-        # Add labels for language modeling
-        tokenized["labels"] = tokenized["input_ids"].copy()
-
-        return tokenized
+        try:
+            texts = examples["text"]
+            if isinstance(texts, str):
+                texts = [texts]
+                
+            # Process in chunks to avoid memory issues
+            all_tokenized = {
+                "input_ids": [],
+                "attention_mask": [],
+                "labels": []
+            }
+            
+            for i in range(0, len(texts), self.chunk_size):
+                chunk = texts[i:i + self.chunk_size]
+                tokenized = self.tokenizer(
+                    chunk,
+                    truncation=True,
+                    max_length=self.max_seq_length,
+                    padding=False,
+                    return_attention_mask=True,
+                    return_tensors=None  # Return lists for easier concatenation
+                )
+                
+                all_tokenized["input_ids"].extend(tokenized["input_ids"])
+                all_tokenized["attention_mask"].extend(tokenized["attention_mask"])
+                all_tokenized["labels"].extend(tokenized["input_ids"])  # Use input_ids as labels
+                
+            return all_tokenized
+            
+        except Exception as e:
+            logger.error(f"Error in preprocessing: {str(e)}")
+            raise
 
 
 def load_and_prepare_datasets(
@@ -184,28 +198,53 @@ class CustomDataCollator:
     def __init__(self, tokenizer: PreTrainedTokenizer):
         self.tokenizer = tokenizer
         self.pad_token_id = tokenizer.pad_token_id
-
+        if self.pad_token_id is None:
+            self.pad_token_id = tokenizer.eos_token_id
+            logger.warning("No pad token found, using eos token instead")
+            
     def __call__(self, features):
-        # Get max length in batch
-        max_length = max(len(x["input_ids"]) for x in features)
-
-        # Initialize tensors
-        batch_size = len(features)
-        batch = {
-            "input_ids": torch.full(
-                (batch_size, max_length), self.pad_token_id, dtype=torch.long
-            ),
-            "attention_mask": torch.zeros((batch_size, max_length), dtype=torch.long),
-            "labels": torch.full((batch_size, max_length), -100, dtype=torch.long),
-        }
-
-        # Fill tensors
-        for i, feature in enumerate(features):
-            input_ids = feature["input_ids"]
-            length = len(input_ids)
-
-            batch["input_ids"][i, :length] = torch.tensor(input_ids)
-            batch["attention_mask"][i, :length] = 1
-            batch["labels"][i, :length] = torch.tensor(feature["labels"])
-
-        return batch
+        try:
+            # Validate input
+            if not features:
+                raise ValueError("Empty batch received")
+                
+            # Get max length in batch
+            max_length = max(len(x["input_ids"]) for x in features)
+            batch_size = len(features)
+            
+            # Pre-allocate tensors on the right device
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            batch = {
+                "input_ids": torch.full(
+                    (batch_size, max_length), 
+                    self.pad_token_id, 
+                    dtype=torch.long,
+                    device=device
+                ),
+                "attention_mask": torch.zeros(
+                    (batch_size, max_length), 
+                    dtype=torch.long,
+                    device=device
+                ),
+                "labels": torch.full(
+                    (batch_size, max_length), 
+                    -100, 
+                    dtype=torch.long,
+                    device=device
+                )
+            }
+            
+            # Fill tensors efficiently
+            for i, feature in enumerate(features):
+                input_ids = torch.tensor(feature["input_ids"], dtype=torch.long)
+                length = len(input_ids)
+                
+                batch["input_ids"][i, :length] = input_ids
+                batch["attention_mask"][i, :length] = 1
+                batch["labels"][i, :length] = input_ids
+                
+            return batch
+            
+        except Exception as e:
+            logger.error(f"Error in data collation: {str(e)}")
+            raise

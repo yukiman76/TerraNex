@@ -1,7 +1,7 @@
 # Core dependencies
 torch>=2.0.0
 transformers>=4.30.0
-datasets>=2.12.0
+datasets>=2.10.0
 numpy>=1.24.0
 tqdm>=4.65.0
 
@@ -23,5 +23,6 @@ accelerate>=0.20.0
 # Optional: improved training speed
 ninja>=1.11.0
 einops>=0.6.0
-mlflow
+mlflow>=2.4.0
 pynvml
+pyyaml>=6.0
