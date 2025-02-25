@@ -109,11 +109,12 @@ class ExpertBalancingTrainer(Trainer):
             # Calculate expert usage statistics
             expert_usages = self._calculate_expert_usage(router_logits)
 
+            print(loss.detach().cpu())
             # Prepare metrics dictionary
             metrics = {
-                "loss/cross_entropy": float(loss.detach().cpu()),
-                "loss/balance": float(balance_loss.detach().cpu()),
-                "loss/total": float(total_loss.detach().cpu()),
+                "loss/cross_entropy": float(loss.detach().mean().cpu()),
+                "loss/balance": float(balance_loss.detach().mean().cpu()),
+                "loss/total": float(total_loss.detach().mean().cpu()),
             }
 
             # Add expert usage metrics

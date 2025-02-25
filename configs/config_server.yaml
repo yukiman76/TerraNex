@@ -51,6 +51,7 @@ training:
   save_steps: 1000
   save_total_limit: 2
   expert_balance_importance: 0.01
+  dataloader_num_workers: 6
 
 
 logging:

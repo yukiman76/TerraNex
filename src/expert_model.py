@@ -135,7 +135,7 @@ class MixtureOfExperts(nn.Module):
                 expert_input = x * tokens_mask.float()
                 expert_output = self.experts[expert_idx](expert_input)
                 output += expert_output * expert_probs * tokens_mask.float()
-
+        
         return output, router_logits
 
 
@@ -295,6 +295,8 @@ class MoELanguageModel(nn.Module):
         # Project to vocabulary
         logits = self.output_projection(x)
 
+        # import IPython
+        # IPython.embed()
         # Calculate loss if labels provided
         loss = None
         if labels is not None:
@@ -305,11 +307,15 @@ class MoELanguageModel(nn.Module):
                 shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
             )
 
-        if return_router_logits:
-            Output = namedtuple("Output", ["loss", "logits", "router_logits"])
-            return Output(loss=loss, logits=logits, router_logits=router_logits_list)
+        # print(f"loss {loss}")
+        # print(f"logits {logits}")
+        # if return_router_logits:
+        Output = namedtuple("Output", ["loss", "logits", "router_logits"])
+        return Output(loss=loss, logits=logits, router_logits=router_logits_list)
 
-        return loss if loss is not None else logits
+        # print(f"loss {loss}")
+        # print(f"logits {logits}")
+        # return loss if loss is not None else logits
 
     def generate(
         self,
@@ -317,7 +323,7 @@ class MoELanguageModel(nn.Module):
         max_new_tokens: int,
         temperature: float = 1.0,
         top_k: int = 50,
-    ) -> torch.Tensor:
+        ) -> torch.Tensor:
 
         batch_size = input_ids.shape[0]
         generated_ids = input_ids.clone()
@@ -331,8 +337,16 @@ class MoELanguageModel(nn.Module):
 
             # Get next token probabilities
             with torch.no_grad():
-                outputs = self(context_ids)
-                next_token_logits = outputs[:, -1, :] / temperature
+                # Forward pass returns a tuple during training but we only need logits here
+                outputs = self(context_ids, return_router_logits=False)
+                
+                # Check if outputs is a tuple (happened during training) or just logits
+                if isinstance(outputs, tuple):
+                    logits = outputs[0] if outputs[0] is not None else outputs[1]
+                else:
+                    logits = outputs
+                    
+                next_token_logits = logits[:, -1, :] / temperature
 
                 # Apply top-k sampling
                 if top_k > 0:
