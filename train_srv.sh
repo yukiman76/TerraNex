@@ -7,4 +7,5 @@ export MLFLOW_S3_IGNORE_TLS=true
 export MLFLOW_TRACKING_URI=http://192.168.2.30:5000 
 
 # Train using the Wikitext config
-accelerate launch src/train.py --config_file configs/config_server.yaml
+# accelerate launch src/train.py --config_file configs/config_server.yaml
+accelerate launch expertlm/train.py --config_file configs/config_aisrv02.yaml

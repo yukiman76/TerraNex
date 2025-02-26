@@ -49,7 +49,7 @@ training:
   gradient_accumulation_steps: 4
   learning_rate: 5.0e-5  # Explicitly formatted as float
   weight_decay: 0.01
-  num_train_epochs: 300
+  num_train_epochs: 10
   warmup_steps: 500
   logging_steps: 100
   eval_steps: 500

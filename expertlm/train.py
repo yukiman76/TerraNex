@@ -19,6 +19,7 @@ from collections import defaultdict
 
 import torch
 import torch.nn as nn
+import torch.multiprocessing as mp
 
 from transformers import (
     AutoTokenizer,
@@ -305,6 +306,7 @@ def cleanup_resources():
 
 
 def main():
+    mp.set_start_method('spawn', force=True)
     parser = argparse.ArgumentParser(
         description="Train MoE Language Model with config file"
     )
@@ -407,7 +409,7 @@ def main():
             save_strategy="steps",
             # make dataloader faster
             dataloader_num_workers=args.dataloader_num_workers,
-            dataloader_pin_memory=True,
+            dataloader_pin_memory=False,
             dataloader_prefetch_factor=2,
             dataloader_persistent_workers=True,
             # Enable torch.compile for PyTorch 2.0+
@@ -515,7 +517,7 @@ def main():
             args=training_args,
             train_dataset=datasets["train"],
             eval_dataset=datasets.get("validation", None),
-            tokenizer=tokenizer,  # Use tokenizer instead of processing_class
+            processing_class=tokenizer,  # Use tokenizer instead of processing_class
             expert_balance_importance=args.expert_balance_importance,
             data_collator=data_collator,
             use_mlflow=args.use_mlflow,
