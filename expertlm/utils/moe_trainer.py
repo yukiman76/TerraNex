@@ -28,6 +28,7 @@ class ExpertBalancingTrainer(Trainer):
         self.expert_balance_importance = expert_balance_importance
         self.use_mlflow = use_mlflow
         self.expert_monitor = expert_monitor
+        self.last_logged_step = None
         
     def _calculate_balance_loss(self, router_logits):
         """Calculate expert balancing loss across all layers"""
@@ -79,7 +80,7 @@ class ExpertBalancingTrainer(Trainer):
         index = np.arange(1, n + 1)
         return ((2 * index - n - 1) * values).sum() / (n * values.sum())
 
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         outputs = model(**inputs, return_router_logits=True)
         loss = outputs.loss
         

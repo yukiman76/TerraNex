@@ -16,7 +16,6 @@ import argparse
 import math
 import logging
 from collections import defaultdict
-from typing import Dict
 
 import torch
 import torch.nn as nn
@@ -25,25 +24,22 @@ from transformers import (
     AutoTokenizer,
     set_seed,
     TrainingArguments,
-    Trainer,
 )
 from datasets import load_dataset
 import yaml
 import mlflow
-from torch.utils.data import DataLoader
-from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 
 # Import our MoE model
-from expert_model import MoELanguageModel
+from expertlm.models import MoELanguageModel
 
-from utils.device import (
+from expertlm.utils.device import (
     setup_device,
     optimize_cuda_performance,
     get_device_map,
     log_device_info,
 )
-from utils.data import load_and_prepare_datasets, DataConfig, CustomDataCollator
-from utils.moe_trainer import ExpertBalancingTrainer
+from expertlm.utils.data import load_and_prepare_datasets, DataConfig, CustomDataCollator
+from expertlm.utils.moe_trainer import ExpertBalancingTrainer
 
 # Set up logging
 logging.basicConfig(
@@ -137,7 +133,7 @@ def config_to_args(config):
         "k_experts": 2,
         "dropout": 0.1,
         # Training defaults
-        "dataloader_num_workers": 1, 
+        "dataloader_num_workers": 1,
         "output_dir": "./moe-model",
         "overwrite_output_dir": False,
         "do_train": True,
@@ -208,24 +204,26 @@ def validate_config(config: dict) -> None:
     for section in required_sections:
         if section not in config:
             raise ValueError(f"Missing required section: {section}")
-            
+
     # Validate model config
     model_config = config["model"]
     required_model_params = ["d_model", "n_layers", "num_experts", "num_heads"]
     for param in required_model_params:
         if param not in model_config:
             raise ValueError(f"Missing required model parameter: {param}")
-            
+
     # Validate data config
     data_config = config["data"]
     if not data_config.get("dataset_name") and not data_config.get("train_file"):
         raise ValueError("Either dataset_name or train_file must be specified")
-        
+
     # Validate training config
     training_config = config["training"]
     required_training_params = [
-        "output_dir", "per_device_train_batch_size", 
-        "learning_rate", "num_train_epochs"
+        "output_dir",
+        "per_device_train_batch_size",
+        "learning_rate",
+        "num_train_epochs",
     ]
     for param in required_training_params:
         if param not in training_config:
@@ -238,45 +236,51 @@ class ExpertMonitor:
         self.expert_loss = defaultdict(float)
         self.domain_metrics = defaultdict(lambda: defaultdict(float))
         self.total_tokens = 0
-        
+
     def update(self, router_logits: torch.Tensor, loss: torch.Tensor, model: nn.Module):
         with torch.no_grad():
             # Existing metrics update
             expert_assignments = router_logits.argmax(dim=-1)
             for expert_idx in range(router_logits.shape[-1]):
-                self.expert_usage[expert_idx] += (expert_assignments == expert_idx).sum().item()
+                self.expert_usage[expert_idx] += (
+                    (expert_assignments == expert_idx).sum().item()
+                )
             self.total_tokens += router_logits.numel()
-            
+
             # Track domain-specific metrics - fixed to access experts properly
-            if hasattr(model, 'layers') and model.layers:
+            if hasattr(model, "layers") and model.layers:
                 for layer_idx, layer in enumerate(model.layers):
-                    if len(layer) >= 3 and hasattr(layer[2], 'experts'):
+                    if len(layer) >= 3 and hasattr(layer[2], "experts"):
                         moe_layer = layer[2]
                         for expert_idx, expert in enumerate(moe_layer.experts):
-                            if hasattr(expert, 'expert_type'):
+                            if hasattr(expert, "expert_type"):
                                 domain_type = expert.expert_type
-                                self.domain_metrics[domain_type]["usage"] += self.expert_usage[expert_idx]
+                                self.domain_metrics[domain_type][
+                                    "usage"
+                                ] += self.expert_usage[expert_idx]
                                 if hasattr(expert, "activation_patterns"):
-                                    self.domain_metrics[domain_type]["activation"] = (
-                                        expert.activation_patterns.mean().item()
-                                    )
+                                    self.domain_metrics[domain_type][
+                                        "activation"
+                                    ] = expert.activation_patterns.mean().item()
                                 if hasattr(expert, "domain_loss"):
-                                    self.domain_metrics[domain_type]["loss"] = expert.domain_loss.item()
-                    
+                                    self.domain_metrics[domain_type][
+                                        "loss"
+                                    ] = expert.domain_loss.item()
+
     def get_metrics(self):
         metrics = {}
-        
+
         # Expert usage metrics
         for expert_idx, count in self.expert_usage.items():
             metrics[f"expert_{expert_idx}_usage"] = count / self.total_tokens
-            
+
         # Domain-specific metrics
         for domain, domain_stats in self.domain_metrics.items():
             for metric_name, value in domain_stats.items():
                 metrics[f"domain_{domain}_{metric_name}"] = (
                     value / self.total_tokens if metric_name == "usage" else value
                 )
-                
+
         return metrics
 
 
@@ -286,16 +290,16 @@ def cleanup_resources():
         # Clear CUDA cache
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            
+
         # End MLflow run if active
         if mlflow.active_run():
             mlflow.end_run()
-            
+
         # Close all file handles
         for handler in logger.handlers[:]:
             handler.close()
             logger.removeHandler(handler)
-            
+
     except Exception as e:
         logger.error(f"Error during cleanup: {str(e)}")
 
@@ -515,7 +519,7 @@ def main():
             expert_balance_importance=args.expert_balance_importance,
             data_collator=data_collator,
             use_mlflow=args.use_mlflow,
-            expert_monitor=ExpertMonitor()
+            expert_monitor=ExpertMonitor(),
         )
 
         # Train model

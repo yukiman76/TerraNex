@@ -61,7 +61,7 @@ training:
 
 logging:
   mlflow:
-    enabled: true
+    enabled: false
     # tracking_uri: "http://127.0.0.1:8080"  # Optional
     experiment_name: "moe_language_model"
     tags:  # Optional custom tags

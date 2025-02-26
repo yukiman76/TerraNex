@@ -6,6 +6,9 @@ hardware:
   fp16: false     # Disable mixed precision for MPS
   bf16: false     # Disable mixed precision for MPS
   gradient_checkpointing: true
+  optimize_memory: true
+  max_grad_norm: 1.0
+  mixed_precision: "no"  # or "fp16" or "bf16" depending on hardware
 
 # Data configuration
 data:
@@ -32,6 +35,8 @@ model:
   num_heads: 6
   k_experts: 2
   dropout: 0.1
+  attention_implementation: "flash_attention"  # or "standard"
+  use_cache: false  # Disable KV cache during training
 
 # Training configuration
 training:
