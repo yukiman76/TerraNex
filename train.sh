@@ -3,6 +3,7 @@ export WANDB_DISABLED=true
 export CUDA_VISIBLE_DEVICES=0,2,3
 # Train using the Wikitext config
 # First, install the package in development mode if not already installed
+pip uninstall -e . 
 pip install -e . 
 
 # Then run the training script
