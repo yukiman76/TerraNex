@@ -1,0 +1,77 @@
+# MoE Language Model Training Configuration for Apple Silicon
+
+# Device and hardware configuration
+hardware:
+  no_cuda: false  # Keep false to allow MPS
+  fp16: false     # Disable mixed precision for MPS
+  bf16: false     # Disable mixed precision for MPS
+  gradient_checkpointing: true
+  optimize_memory: true
+  max_grad_norm: 1.0
+  mixed_precision: "no"  # or "fp16" or "bf16" depending on hardware
+
+# Data configuration
+data:
+  # Dataset loading options
+  dataset_name: "wikitext"
+  dataset_config_name: "wikitext-103-raw-v1"
+  # train_file: "path/to/train.txt"  # Optional: local file path
+  # validation_file: "path/to/valid.txt"  # Optional: local file path
+  max_seq_length: 1024
+  preprocessing_num_workers: 10
+  overwrite_cache: false
+  validation_split_percentage: 5
+  streaming: true  # Set to true for very large datasets
+  max_train_samples: 1000
+  max_eval_samples: 100
+
+
+# Model configuration - Smaller model for MPS
+model:
+  d_model: 384
+  n_layers: 4
+  num_experts: 8
+  ffn_hidden_dim: 1536
+  num_heads: 6
+  k_experts: 2
+  dropout: 0.1
+  attention_implementation: "flash_attention"  # or "standard"
+  use_cache: false  # Disable KV cache during training
+
+# Training configuration
+training:
+  output_dir: "./moe-model-mps"
+  overwrite_output_dir: true
+  do_train: true
+  do_eval: true
+  per_device_train_batch_size: 200  # Adjusted for MPS memory
+  per_device_eval_batch_size: 10
+  gradient_accumulation_steps: 1
+  learning_rate: 5.0e-5  # Explicitly formatted as float
+  weight_decay: 0.01
+  num_train_epochs: 2
+  warmup_steps: 500
+  logging_steps: 100
+  eval_steps: 500
+  save_steps: 1000
+  save_total_limit: 2
+  expert_balance_importance: 0.01
+  dataloader_num_workers: 2
+
+
+logging:
+  mlflow:
+    enabled: false
+    # tracking_uri: "http://127.0.0.1:8080"  # Optional
+    experiment_name: "moe_language_model"
+    tags:  # Optional custom tags
+      project: "language_model"
+      version: "v1.0"
+  tensorboard:
+    enabled: false
+    log_dir: "runs/"
+
+# General settings
+seed: 42
+report_to: "mlflow"
+run_name: "moe-8experts"

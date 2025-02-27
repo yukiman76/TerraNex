@@ -1,0 +1,33 @@
+# Core dependencies
+torch>=2.0.0
+transformers>=4.30.0
+datasets>=2.10.0
+numpy>=1.24.0
+tqdm>=4.65.0
+
+# Logging and visualization
+tensorboard>=2.13.0
+wandb>=0.15.0  # Optional, for experiment tracking
+
+# Text processing
+tokenizers>=0.13.3
+
+# Utilities
+scikit-learn>=1.2.2
+matplotlib>=3.7.1
+pandas>=2.0.0
+
+# Optional: for distributed training
+accelerate>=0.20.0
+
+# Optional: improved training speed
+ninja>=1.11.0
+einops>=0.6.0
+mlflow>=2.4.0
+pynvml
+pyyaml>=6.0
+
+
+#for profileing 
+tensorboard
+torch_tb_profiler
