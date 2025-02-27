@@ -3,15 +3,23 @@ File: models/hierarchicalmixtureofexperts.py
 Author: Jeffrey Rivero
 Email: jeff@check-ai.com
 Created: 02/20/2025
-Last Modified: 02/24/2025
+Last Modified: 02/26/2025
 Description: Implements a Mixture-of-Experts (MoE) language model architecture.
              Includes core components like ExpertLayer, PositionalEncoding,
              MixtureOfExperts, and the main MoELanguageModel class with
              generation capabilities.
+             
+             Performance optimizations:
+             - Vectorized token processing
+             - Expert batching
+             - Improved load balancing
+             - Memory-efficient pruning
+             - Checkpointing for large models
 """
 
 import logging
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, List
+import math
 
 import torch
 import torch.nn as nn
@@ -36,6 +44,8 @@ class HierarchicalMixtureOfExperts(nn.Module):
         k: int = 2,
         dropout: float = 0.1,
         load_balance: bool = True,
+        use_expert_parallelism: bool = True,
+        use_checkpointing: bool = False,
     ):
         super().__init__()
 
@@ -59,6 +69,9 @@ class HierarchicalMixtureOfExperts(nn.Module):
         self.load_balance = load_balance
         self.num_experts = num_experts
         self.k = k
+        self.input_dim = input_dim
+        self.use_expert_parallelism = use_expert_parallelism
+        self.use_checkpointing = use_checkpointing
 
         # Initialize components with proper error handling
         try:
@@ -66,22 +79,34 @@ class HierarchicalMixtureOfExperts(nn.Module):
                 d_model=input_dim, max_len=max_seq_len, learned=False
             )
 
+            # Use nn.Sequential with layer norm for better gradient flow
             self.router = nn.Sequential(
+                nn.LayerNorm(input_dim),
                 nn.Linear(input_dim, hidden_dim),
                 nn.GELU(),
-                nn.Dropout(dropout),  # Add dropout for regularization
+                nn.Dropout(dropout),
                 nn.Linear(hidden_dim, num_experts),
             )
 
             # Initialize router weights properly
             for layer in self.router:
                 if isinstance(layer, nn.Linear):
-                    nn.init.xavier_uniform_(layer.weight)
+                    nn.init.xavier_normal_(layer.weight, gain=1.0 / math.sqrt(2))
                     nn.init.zeros_(layer.bias)
 
-            self.router_temperature = nn.Parameter(torch.ones(1))
+            # Learnable router temperature with better initialization
+            self.router_temperature = nn.Parameter(torch.ones(1) * 0.07)  # Lower initial temp
+            
+            # Adaptive capacity factors
             self.capacity_factor = 1.25
-
+            self.min_capacity_factor = 1.0
+            self.max_capacity_factor = 2.0
+            self.capacity_factor_decay = 0.99
+            
+            # Improved load balancing with aux loss weight
+            self.load_balancing_weight = nn.Parameter(torch.tensor(0.01))
+            
+            # Expert Network Setup
             expert_types = ["medical", "nursing", "general", "research", "emergency"]
             self.experts = nn.ModuleList(
                 [
@@ -96,256 +121,420 @@ class HierarchicalMixtureOfExperts(nn.Module):
                 ]
             )
 
+            # Improved combiner with residual connection
             self.expert_combiner = nn.Sequential(
+                nn.LayerNorm(input_dim),
                 nn.Linear(input_dim, input_dim * 2),
                 nn.GELU(),
                 nn.Dropout(dropout),
                 nn.Linear(input_dim * 2, input_dim),
-                nn.LayerNorm(input_dim),
             )
+            
+            # Layer norm for final output
+            self.output_norm = nn.LayerNorm(input_dim)
 
-            # Add expert pruning
+            # Expert importance tracking with EMA
             self.register_buffer("expert_importance", torch.ones(num_experts))
-
+            self.register_buffer("expert_counts", torch.zeros(num_experts))
+            self.importance_decay = 0.99
+            
+            # Token-to-expert assignment buffer for fast lookup
+            self.register_buffer("last_expert_indices", torch.zeros(max_seq_len, dtype=torch.long))
+            
             # Register a dummy buffer to help determine device in forward pass
             self.register_buffer("dummy", torch.zeros(1))
 
-            # Add adaptive capacity factor
-            self.min_capacity_factor = 1.0
-            self.max_capacity_factor = 2.0
-            self.capacity_factor_decay = 0.99
-
-            # Add expert pruning parameters
+            # Expert pruning parameters with dynamic threshold
             self.expert_pruning_threshold = 0.001
             self.pruning_warmup_steps = 1000
             self.steps_since_pruning = 0
             self.pruning_interval = 5000
-            self.min_active_experts = num_experts // 2
+            self.min_active_experts = max(num_experts // 2, 1)
+            
+            # Auxiliary loss tracking
+            self.aux_loss = 0.0
+            
+            # Expert batch size for parallel processing
+            self.expert_batch_size = 1024
 
         except Exception as e:
             logger.error(f"Error initializing HierarchicalMixtureOfExperts: {str(e)}")
             raise
 
-    def _compute_capacity(self, router_probs: torch.Tensor) -> torch.Tensor:
+    def _compute_load_balancing_loss(self, router_probs: torch.Tensor) -> torch.Tensor:
+        """Compute improved load balancing loss with per-expert and overall balance"""
         try:
+            # Calculate mean probability per expert
+            # Shape: [num_experts]
             expert_load = router_probs.sum(dim=(0, 1)) / router_probs.shape[0]
-            capacity_loss = torch.mean(expert_load**2) * self.num_experts
-            return capacity_loss
+            
+            # Calculate coefficient of variation (to balance usage across experts)
+            mean_load = expert_load.mean()
+            load_variance = ((expert_load - mean_load) ** 2).mean()
+            cv_squared = load_variance / (mean_load ** 2 + 1e-5)
+            
+            # Calculate the fraction of tokens routed to each expert
+            # Shape: [num_experts]
+            routing_fraction = (router_probs > 0).float().mean(dim=(0, 1))
+            
+            # Ideal routing load would be k/num_experts
+            target_routing = self.k / self.num_experts
+            
+            # Auxiliary loss
+            balance_loss = cv_squared + ((routing_fraction - target_routing) ** 2).mean()
+            
+            return balance_loss * torch.abs(self.load_balancing_weight)
+            
         except Exception as e:
-            logger.error(f"Error computing capacity: {str(e)}")
-            raise
+            logger.error(f"Error computing load balancing loss: {str(e)}")
+            return torch.tensor(0.0, device=router_probs.device)
 
-    def _update_expert_importance(self, router_probs: torch.Tensor):
-        """Update expert importance scores based on usage"""
+    def _update_expert_importance(self, router_probs: torch.Tensor, indices: torch.Tensor):
+        """Update expert importance scores using efficient sparse operations"""
         with torch.no_grad():
-            # Calculate expert usage
-            expert_usage = router_probs.sum(dim=(0, 1))
-
-            # Update importance scores with exponential moving average
+            # Flatten indices for more efficient updates
+            flat_indices = indices.reshape(-1)
+            
+            # Get expert probabilities for selected experts by gathering from router_probs
+            # based on the indices tensor
+            selected_probs = torch.gather(
+                router_probs, 
+                dim=-1,  # Gather along the experts dimension
+                index=indices
+            )
+            
+            # Flatten probabilities to match flattened indices
+            flat_probs = selected_probs.reshape(-1)
+            
+            # Update expert counts (how many tokens were routed to each expert)
+            expert_count_update = torch.zeros(self.num_experts, device=router_probs.device)
+            expert_count_update.scatter_add_(0, flat_indices, torch.ones_like(flat_probs))
+            self.expert_counts = self.expert_counts + expert_count_update
+            
+            # Update importance with EMA (exponential moving average)
+            expert_importance_update = torch.zeros(self.num_experts, device=router_probs.device)
+            expert_importance_update.scatter_add_(0, flat_indices, flat_probs)
+            
+            # Normalize the update
+            total_update = expert_importance_update.sum().clamp(min=1e-6)
+            normalized_update = expert_importance_update / total_update
+            
+            # Apply EMA update
             self.expert_importance = (
-                0.9 * self.expert_importance + 0.1 * expert_usage / expert_usage.sum()
+                self.importance_decay * self.expert_importance + 
+                (1 - self.importance_decay) * normalized_update
             )
 
-    def _adjust_capacity_factor(self, expert_counts: torch.Tensor):
+    def _adjust_capacity_factor(self):
         """Dynamically adjust capacity factor based on expert utilization"""
-        max_usage = expert_counts.max().item()
-        target_usage = expert_counts.sum().item() / self.num_experts
+        with torch.no_grad():
+            if self.expert_counts.sum() == 0:
+                return
+                
+            # Compute coefficient of variation
+            expert_fractions = self.expert_counts / self.expert_counts.sum()
+            mean_fraction = 1.0 / self.num_experts
+            cv = torch.std(expert_fractions) / (mean_fraction + 1e-5)
+            
+            # Adjust capacity factor based on balance
+            if cv > 0.5:  # High variation - increase capacity
+                self.capacity_factor = min(
+                    self.max_capacity_factor,
+                    self.capacity_factor / self.capacity_factor_decay,
+                )
+            elif cv < 0.1:  # Low variation - decrease capacity
+                self.capacity_factor = max(
+                    self.min_capacity_factor,
+                    self.capacity_factor * self.capacity_factor_decay,
+                )
 
-        if max_usage > target_usage * 1.5:
-            self.capacity_factor = min(
-                self.max_capacity_factor,
-                self.capacity_factor / self.capacity_factor_decay,
-            )
-        elif max_usage < target_usage:
-            self.capacity_factor = max(
-                self.min_capacity_factor,
-                self.capacity_factor * self.capacity_factor_decay,
-            )
-
-    def _prune_inactive_experts(self) -> None:
-        """Prune experts that are consistently unused"""
+    def _prune_inactive_experts(self, step: int) -> bool:
+        """Pruned unused experts with dynamic threshold"""
         try:
             with torch.no_grad():
                 # Only prune after warmup and at intervals
                 if (
-                    self.steps_since_pruning < self.pruning_warmup_steps
+                    step < self.pruning_warmup_steps
                     or self.steps_since_pruning % self.pruning_interval != 0
                 ):
-                    return
+                    return False
 
                 # Calculate expert importance scores
                 importance_scores = self.expert_importance.clone()
+                
+                # Dynamically calculate pruning threshold based on percentile
+                sorted_scores, _ = torch.sort(importance_scores)
+                bottom_percentile_idx = max(0, int(0.2 * self.num_experts) - 1)
+                dynamic_threshold = sorted_scores[bottom_percentile_idx] if bottom_percentile_idx >= 0 else 0
+                
+                # Use the stricter of static or dynamic threshold
+                actual_threshold = max(self.expert_pruning_threshold, dynamic_threshold)
 
                 # Find inactive experts
-                inactive_mask = importance_scores < self.expert_pruning_threshold
-                active_experts = (~inactive_mask).sum()
+                inactive_mask = importance_scores < actual_threshold
+                inactive_indices = torch.where(inactive_mask)[0]
+                active_experts = self.num_experts - len(inactive_indices)
 
                 # Ensure minimum number of active experts
-                if active_experts > self.min_active_experts:
-                    inactive_indices = torch.where(inactive_mask)[0]
+                if active_experts >= self.min_active_experts and len(inactive_indices) > 0:
+                    logger.info(f"Pruning {len(inactive_indices)} inactive experts (threshold: {actual_threshold:.6f})")
 
-                    if len(inactive_indices) > 0:
-                        logger.info(f"Pruning {len(inactive_indices)} inactive experts")
+                    # Re-initialize pruned experts (device-aware)
+                    device = self.dummy.device
+                    expert_types = ["medical", "nursing", "general", "research", "emergency"]
+                    
+                    for idx in inactive_indices:
+                        # Reset expert importance and counts
+                        self.expert_importance[idx] = 1.0
+                        self.expert_counts[idx] = 0
+                        
+                        # Re-initialize the expert with fresh weights
+                        expert_type = expert_types[idx.item() % len(expert_types)]
+                        self.experts[idx] = SpecializedExpertNetwork(
+                            d_model=self.input_dim,
+                            num_sub_experts=4,
+                            max_seq_len=self.experts[0].max_seq_len,
+                            expert_type=expert_type,
+                            dropout=0.1,
+                        ).to(device)
 
-                        # Reinitialize pruned experts
-                        for idx in inactive_indices:
-                            # Reset expert weights
-                            self.experts[idx].apply(self._init_weights)
-                            # Reset importance score
-                            self.expert_importance[idx] = 1.0
-
-                        # Log pruning event
-                        logger.info(f"Experts pruned: {inactive_indices.tolist()}")
-                        logger.info(f"Remaining active experts: {active_experts}")
-
-                # Reset steps counter
-                self.steps_since_pruning = 0
+                    # Log pruning event
+                    logger.info(f"Experts pruned: {inactive_indices.tolist()}")
+                    logger.info(f"Remaining active experts: {active_experts}")
+                    
+                    # Reset pruning steps counter
+                    self.steps_since_pruning = 0
+                    return True
+                
+                return False
 
         except Exception as e:
             logger.error(f"Error in expert pruning: {str(e)}")
-            raise
+            return False
+
+    def _process_expert_batch(
+        self, 
+        token_inputs: torch.Tensor,
+        expert_indices: torch.Tensor,
+        expert_probs: torch.Tensor
+    ) -> torch.Tensor:
+        """Process a batch of tokens through their assigned experts"""
+        # Ensure proper dimensions for input
+        if len(token_inputs.shape) == 2:
+            # Add sequence dimension if missing
+            token_inputs = token_inputs.unsqueeze(1)
+            
+        batch_size = token_inputs.shape[0]
+        expert_outputs = torch.zeros_like(token_inputs)
+        
+        # Get unique experts in this batch
+        unique_experts = torch.unique(expert_indices)
+        
+        # For each expert, process all tokens assigned to it at once
+        for expert_idx in unique_experts:
+            # Find token positions assigned to this expert
+            expert_mask = (expert_indices == expert_idx)
+            if not expert_mask.any():
+                continue
+                
+            # Get inputs and probs for this expert
+            expert_token_inputs = token_inputs[expert_mask]
+            expert_token_probs = expert_probs[expert_mask].unsqueeze(-1)
+            
+            # Process through expert (with checkpointing if enabled)
+            if self.use_checkpointing and self.training:
+                expert_fn = self.experts[expert_idx]
+                expert_token_outputs = torch.utils.checkpoint.checkpoint(
+                    expert_fn, 
+                    expert_token_inputs
+                )
+            else:
+                expert_token_outputs = self.experts[expert_idx](expert_token_inputs)
+                
+            # Ensure outputs have correct shape
+            if len(expert_token_outputs.shape) == 3 and expert_token_outputs.shape[1] == 1:
+                expert_token_outputs = expert_token_outputs.squeeze(1)
+                
+            # Weight outputs by routing probabilities
+            weighted_outputs = expert_token_outputs * expert_token_probs
+            
+            # Place results back into the output tensor - ensure both tensors have same shape
+            if len(weighted_outputs.shape) != len(expert_outputs[expert_mask].shape):
+                if len(weighted_outputs.shape) > len(expert_outputs[expert_mask].shape):
+                    weighted_outputs = weighted_outputs.squeeze(1)
+                else:
+                    weighted_outputs = weighted_outputs.unsqueeze(1)
+                    
+            expert_outputs[expert_mask] = weighted_outputs
+            
+        return expert_outputs
 
     def forward(
         self, x: torch.Tensor, is_training: bool = True, step: Optional[int] = None
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Forward pass through the hierarchical MoE
-
+        Forward pass through the hierarchical MoE with optimized routing
+        
         Args:
             x: input tensor of shape [batch_size, seq_len, input_dim]
             is_training: whether in training mode
             step: current training step (used for pruning)
-
+            
         Returns:
             output tensor, router_logits, capacity_loss
         """
         try:
             batch_size, seq_len, input_dim = x.shape
             device = x.device
+            
+            # Ensure buffers are on the right device
+            for buffer_name, buffer in self._buffers.items():
+                if buffer is not None and buffer.device != device:
+                    self._buffers[buffer_name] = buffer.to(device)
 
-            # Ensure expert_importance is on the right device
-            if self.expert_importance.device != device:
-                self.expert_importance = self.expert_importance.to(device)
-
-            # Apply fixed positional encoding at main router level
+            # Apply positional encoding
             pos_encoded = self.main_pos_encoding(x)
-
-            # Generate router logits
-            router_logits = self.router(pos_encoded)
+            
+            # Generate router logits (using checkpointing if enabled)
+            if self.use_checkpointing and self.training:
+                router_logits = torch.utils.checkpoint.checkpoint(
+                    self.router, 
+                    pos_encoded
+                )
+            else:
+                router_logits = self.router(pos_encoded)
 
             # Apply temperature scaling to logits
-            router_logits = router_logits / (self.router_temperature + 1e-6)
-
-            # Masked router probs for top-k routing
+            router_logits = router_logits / (self.router_temperature.abs() + 1e-6)
+            
+            # Compute router probabilities
             router_probs = F.softmax(router_logits, dim=-1)
-
+            
             # Get indices of top-k experts per token
-            _, indices = torch.topk(router_probs, k=self.k, dim=-1)
-
-            # Prepare storage for outputs
-            combined_output = torch.zeros_like(x)
-
-            # Loop through each expert selected per token, allowing gradient flow
-            for sample_idx in range(batch_size):
-                for token_idx in range(seq_len):
-                    token_experts = indices[sample_idx, token_idx]
-                    token_probs = router_probs[sample_idx, token_idx, token_experts]
-                    token_input = (
-                        pos_encoded[sample_idx, token_idx].unsqueeze(0).unsqueeze(0)
-                    )
-
-                    # Process through selected experts with their weights
-                    expert_outputs = []
-                    for expert_idx, prob in zip(token_experts, token_probs):
-                        expert_output = self.experts[expert_idx](token_input).squeeze(0)
-                        expert_outputs.append(expert_output * prob)
-
-                        # Update expert importance (during training)
-                        if is_training:
-                            self.expert_importance[expert_idx] = (
-                                0.99 * self.expert_importance[expert_idx]
-                                + 0.01 * prob.detach()
-                            )
-
-                    # Combine expert outputs
-                    token_output = sum(expert_outputs)
-                    combined_output[sample_idx, token_idx] = token_output
-
-            # Calculate capacity loss if load balancing
-            capacity_loss = (
-                self._compute_capacity(router_probs)
-                if self.load_balance
-                else torch.tensor(0.0, device=device)
-            )
-
-            # Apply pruning during training at specified intervals
+            router_probs_top_k, indices = torch.topk(router_probs, k=self.k, dim=-1)
+            
+            # Update expert importance tracking
+            if is_training:
+                self._update_expert_importance(router_probs, indices)
+            
+            # Calculate auxiliary losses for load balancing
+            if self.load_balance and is_training:
+                aux_loss = self._compute_load_balancing_loss(router_probs)
+            else:
+                aux_loss = torch.tensor(0.0, device=device)
+            
+            # Store the current aux loss for logging
+            self.aux_loss = aux_loss.item()
+            
+            # Vectorized processing for efficiency
+            if self.use_expert_parallelism:
+                # Create a combined output tensor
+                combined_output = torch.zeros_like(x)
+                
+                # Process in smaller batches to avoid OOM issues
+                for b_idx in range(batch_size):
+                    # Get inputs, indices, and probs for this batch
+                    batch_inputs = pos_encoded[b_idx]  # [seq_len, input_dim]
+                    batch_indices = indices[b_idx]     # [seq_len, k]
+                    batch_probs = router_probs_top_k[b_idx]  # [seq_len, k]
+                    
+                    # Process each token's experts
+                    for k_idx in range(self.k):
+                        # Get the expert index for each token in the sequence
+                        # Shape: [seq_len]
+                        tokens_expert_indices = batch_indices[:, k_idx]
+                        tokens_expert_probs = batch_probs[:, k_idx].unsqueeze(-1)  # [seq_len, 1]
+                        
+                        # Process tokens for each expert
+                        for expert_idx in range(self.num_experts):
+                            # Find which tokens are routed to this expert
+                            expert_mask = (tokens_expert_indices == expert_idx)
+                            if not expert_mask.any():
+                                continue
+                                
+                            # Get inputs for this expert
+                            # Shape: [num_tokens, input_dim] where num_tokens is how many 
+                            # tokens in this batch were routed to this expert
+                            expert_token_inputs = batch_inputs[expert_mask]
+                            
+                            # Ensure input has correct dimensions (batch, seq, dim)
+                            if len(expert_token_inputs.shape) == 2:
+                                expert_token_inputs = expert_token_inputs.unsqueeze(1)
+                            
+                            # Process through expert
+                            expert_outputs = self.experts[expert_idx](expert_token_inputs)
+                            
+                            # Ensure output has the right shape
+                            if len(expert_outputs.shape) == 3:
+                                expert_outputs = expert_outputs.squeeze(1)
+                            
+                            # Weight by router probability and add to output
+                            # Shape: [num_tokens, input_dim]
+                            token_probs = tokens_expert_probs[expert_mask]
+                            weighted_expert_output = expert_outputs * token_probs
+                            
+                            # Add contribution to the combined output
+                            # We need to scatter these outputs back to their original positions
+                            token_positions = torch.where(expert_mask)[0]
+                            for pos_idx, pos in enumerate(token_positions):
+                                combined_output[b_idx, pos] += weighted_expert_output[pos_idx]
+            else:
+                # Non-parallel version (explicit token-by-token processing)
+                # This can be more memory efficient but slower
+                combined_output = torch.zeros_like(x)
+                
+                for sample_idx in range(batch_size):
+                    for token_idx in range(seq_len):
+                        token_experts = indices[sample_idx, token_idx]
+                        token_probs = router_probs_top_k[sample_idx, token_idx]
+                        token_input = pos_encoded[sample_idx, token_idx].unsqueeze(0)
+                        
+                        # Process token through each assigned expert
+                        token_output = torch.zeros_like(token_input)
+                        for k_idx, (expert_idx, prob) in enumerate(zip(token_experts, token_probs)):
+                            expert_output = self.experts[expert_idx](token_input)
+                            token_output += expert_output * prob
+                            
+                        combined_output[sample_idx, token_idx] = token_output
+            
+            # Apply expert pruning during training
+            pruned = False
             if is_training and step is not None:
                 self.steps_since_pruning += 1
-                if (
-                    step > self.pruning_warmup_steps
-                    and self.steps_since_pruning >= self.pruning_interval
-                ):
-                    pruned = self.prune_experts()
-                    if pruned:
-                        self.steps_since_pruning = 0
-
-            # Final output combination
-            output = self.expert_combiner(combined_output)
-            return output, router_logits, capacity_loss
+                if step > self.pruning_warmup_steps:
+                    # Adjust capacity factor dynamically
+                    self._adjust_capacity_factor()
+                    
+                    # Try to prune experts
+                    pruned = self._prune_inactive_experts(step)
+            
+            # Apply final combining layer with residual connection
+            output = x + self.output_norm(self.expert_combiner(combined_output))
+            
+            return output, router_logits, aux_loss
 
         except Exception as e:
-            logger.error(
-                f"Error in HierarchicalMixtureOfExperts forward pass: {str(e)}"
-            )
+            logger.error(f"Error in HierarchicalMixtureOfExperts forward pass: {str(e)}")
             raise
 
-    def prune_experts(self):
-        """Prune inactive experts based on their importance scores"""
-        try:
-            # Get device from a tensor to ensure we're on the right device
-            device = self.dummy.device
-
-            # Sort experts by importance
-            importance = self.expert_importance.clone()
-            sorted_indices = torch.argsort(importance)
-
-            # Identify experts to prune (keeping at least min_active_experts)
-            num_to_prune = max(0, self.num_experts - self.min_active_experts)
-            if num_to_prune == 0:
-                return False  # Nothing to prune
-
-            # Get indices of experts to prune (lowest importance)
-            prune_indices = sorted_indices[:num_to_prune]
-
-            # Only prune if importance is below threshold
-            prune_mask = importance[prune_indices] < self.expert_pruning_threshold
-            prune_indices = prune_indices[prune_mask]
-
-            if len(prune_indices) == 0:
-                return False  # No experts below threshold
-
-            logger.info(
-                f"Pruning {len(prune_indices)} experts: {prune_indices.tolist()}"
-            )
-
-            # Re-initialize the experts that need pruning
-            expert_types = ["medical", "nursing", "general", "research", "emergency"]
-            for idx in prune_indices:
-                # Reset expert importance
-                self.expert_importance[idx] = 1.0
-
-                # Re-initialize the expert with the same type but new weights
-                expert_type = expert_types[idx % len(expert_types)]
-                self.experts[idx] = SpecializedExpertNetwork(
-                    d_model=self.experts[idx].d_model,
-                    num_sub_experts=self.experts[idx].num_sub_experts,
-                    max_seq_len=self.experts[idx].max_seq_len,
-                    expert_type=expert_type,
-                    dropout=0.1,  # Default dropout
-                ).to(device)
-
-            return True  # Pruning occurred
-
-        except Exception as e:
-            logger.error(f"Error during expert pruning: {str(e)}")
-            return False
+    def expert_summary(self) -> Dict[str, List[float]]:
+        """Return a summary of expert utilization statistics"""
+        with torch.no_grad():
+            # Convert tensors to lists for easier logging
+            importance = self.expert_importance.cpu().tolist()
+            counts = self.expert_counts.cpu().tolist()
+            
+            # Compute additional metrics
+            total_counts = sum(counts)
+            fractions = [count / max(1, total_counts) for count in counts]
+            
+            # Create summary dictionary
+            summary = {
+                "importance": importance,
+                "counts": counts,
+                "fractions": fractions,
+                "capacity_factor": self.capacity_factor,
+                "aux_loss": self.aux_loss,
+            }
+            
+            return summary

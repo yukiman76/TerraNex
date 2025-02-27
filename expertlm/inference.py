@@ -13,7 +13,7 @@ import argparse
 import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer
-from expert_model import MoELanguageModel
+from expertlm.models import MoELanguageModel
 from utils.device import setup_device
 from safetensors.torch import load_file
 import json
@@ -35,25 +35,6 @@ def load_config(model_path):
             return config
     except FileNotFoundError:
         raise FileNotFoundError(f"Config file not found at {config_path}")
-
-
-def check_saved_model_old(model_path):
-    """Check if model files exist and print debug info"""
-    model_file = os.path.join(model_path, "model.safetensors")
-    if not os.path.exists(model_file):
-        raise FileNotFoundError(f"Model file not found at {model_file}")
-
-    logger.info(f"Found model file at {model_file}")
-    state_dict = load_file(model_file)
-    logger.info(f"State dict keys: {state_dict.keys()}")
-
-    # Get positional encoding dimensions
-    if "pos_encoding.pe" in state_dict:
-        pe_shape = tuple(state_dict["pos_encoding.pe"].shape)
-        logger.info(f"Positional encoding shape: {pe_shape}")
-        return state_dict, pe_shape
-    else:
-        raise ValueError("Could not find positional encoding in state dict")
 
 
 def create_model_with_config(config, pe_shape):
@@ -229,80 +210,6 @@ def check_saved_model(model_path):
         return state_dict, (max_seq_len, d_model)
     else:
         raise ValueError("Could not find positional encoding in state dict")
-
-
-def load_model_2(model_path, device):
-    """Load the saved MoE model and its configuration"""
-    try:
-        # Load config
-        config = load_config(model_path)
-
-        # Get state dict and shapes
-        state_dict = load_file(os.path.join(model_path, "model.safetensors"))
-
-        # Get positional encoding dimensions
-        if "pos_encoding.pe" not in state_dict:
-            raise ValueError("Could not find positional encoding in state dict")
-
-        pe_tensor = state_dict["pos_encoding.pe"]
-
-        # Add debug logging
-        logger.info(f"PE tensor type: {type(pe_tensor)}")
-        logger.info(f"PE tensor shape: {pe_tensor.shape}")
-        logger.info(f"PE tensor dtype: {pe_tensor.dtype}")
-
-        # Extract dimensions safely
-        max_seq_len = int(pe_tensor.shape[0])
-        d_model = int(pe_tensor.shape[1])
-
-        logger.info(f"Creating model with max_seq_len={max_seq_len}, d_model={d_model}")
-
-        # Create model with explicit int dimensions
-        model = MoELanguageModel(
-            vocab_size=config.get("vocab_size", 50257),
-            d_model=d_model,
-            n_layers=config.get("n_layers", 4),
-            num_experts=config.get("num_experts", 8),
-            ffn_hidden_dim=config.get("ffn_hidden_dim", 2048),
-            num_heads=config.get("num_heads", 8),
-            max_seq_len=max_seq_len,
-            k_experts=config.get("k_experts", 2),
-            dropout=config.get("dropout", 0.1),
-        )
-
-        # Debug state dict loading
-        try:
-            logger.info("Beginning state dict load")
-            # Move to CPU and ensure float tensors
-            processed_state_dict = {}
-            for k, v in state_dict.items():
-                logger.info(f"Processing key: {k}, shape: {v.shape}, dtype: {v.dtype}")
-                processed_state_dict[k] = v.to("cpu").float()
-
-            # Load processed state dict
-            missing_keys, unexpected_keys = model.load_state_dict(
-                processed_state_dict, strict=False
-            )
-
-            if missing_keys:
-                logger.warning(f"Missing keys: {missing_keys}")
-            if unexpected_keys:
-                logger.warning(f"Unexpected keys: {unexpected_keys}")
-
-        except Exception as e:
-            logger.error(f"Error during state dict loading: {str(e)}")
-            raise
-
-        # Move model to device
-        logger.info(f"Moving model to device: {device}")
-        model = model.to(device)
-        model.eval()
-
-        return model, config
-
-    except Exception as e:
-        logger.error(f"Error in load_model: {str(e)}")
-        raise
 
 
 def load_model(model_path, device):

@@ -26,3 +26,8 @@ einops>=0.6.0
 mlflow>=2.4.0
 pynvml
 pyyaml>=6.0
+
+
+#for profileing 
+tensorboard
+torch_tb_profiler

@@ -29,6 +29,9 @@ from transformers import (
 from datasets import load_dataset
 import yaml
 import mlflow
+import os
+from torch.profiler import profile, ProfilerActivity, record_function, tensorboard_trace_handler
+
 
 # Import our MoE model
 from expertlm.models import MoELanguageModel
@@ -483,12 +486,13 @@ def main():
 
         # Check if we need model parallelism
         device_map = get_device_map(param_count, device_info)
-
+        logger.info(f"Using device_map {device_map}")
         # Move model to appropriate device
         if device_map is not None:
             logger.info("Using model parallelism across devices")
             model.parallelize(**device_map)
         else:
+            logger.info(f"Send to device_map {device_map}")
             model = model.to(device_info.device)
 
         # Enable gradient checkpointing if specified
@@ -527,7 +531,105 @@ def main():
         # Train model
         if args.do_train:
             logger.info("Starting train")
-            train_result = trainer.train()
+
+            # Create log directory if it doesn't exist
+            profile_log_dir = os.path.join(args.output_dir, "profile_logs")
+            os.makedirs(profile_log_dir, exist_ok=True)
+
+            # Check if we're running on MPS (Apple Metal)
+            is_mps = device_info.device_type == "mps"
+
+            
+            # For MPS, we need to adjust the profiling approach
+            if is_mps:
+                logger.info("Setting up MPS-compatible profiling")
+                
+                # Define a simpler profiling approach for MPS
+                # MPS doesn't support all the profiling features of CUDA
+                from torch.profiler import profile as simple_profile
+                
+                # Simple profiling function for MPS
+                def profile_training():
+                    with simple_profile() as prof:
+                        train_result = trainer.train()
+                        prof.step()
+                        
+                    import IPython
+                    IPython.embed()
+                    # Save profiling results
+                    summary_file = os.path.join(profile_log_dir, "mps_profile_summary.txt")
+                    with open(summary_file, "w") as f:
+                        f.write(str(prof.key_averages().table(sort_by="cpu_time_total")))
+                    
+                    prof.export_chrome_trace(f"{profile_log_dir}/trace.json")
+                    
+                    logger.info(f"MPS profile summary saved to {summary_file}")
+                    return train_result
+                
+                # Run training with simple profiling
+                logger.info("Starting train with MPS profiling")
+                train_result = profile_training()
+                
+            else:
+                from transformers import TrainerCallback
+                # For CUDA devices, use the full-featured profiler
+                # Define appropriate activities based on device
+                activities = [ProfilerActivity.CPU]
+                if torch.cuda.is_available():
+                    activities.append(ProfilerActivity.CUDA)
+                
+                # Create the profiler
+                profiler = profile(
+                    activities=activities,
+                    schedule=torch.profiler.schedule(
+                        wait=1,      
+                        warmup=2,    
+                        active=5,    
+                        repeat=1     
+                    ),
+                    on_trace_ready=tensorboard_trace_handler(profile_log_dir),
+                    record_shapes=True,
+                    profile_memory=True,
+                    with_stack=True
+                )
+                
+                # Add callbacks to properly profile the training process
+                class ProfilerCallback(TrainerCallback):
+                    def __init__(self, profiler):
+                        self.profiler = profiler
+                        
+                    def on_step_end(self, args, state, control, **kwargs):
+                        self.profiler.step()
+                
+                # Add the profiler callback to the trainer
+                trainer.add_callback(ProfilerCallback(profiler))
+                
+                # Start the profiler before training
+                profiler.start()
+                
+                logger.info("Starting train with CUDA profiling")
+                try:
+                    train_result = trainer.train()
+                finally:
+                    # Make sure the profiler is stopped
+                    profiler.stop()
+                    logger.info(f"Profiling data saved to {profile_log_dir}")
+                    profiler.export_chrome_trace(f"{profile_log_dir}/trace.json")
+
+            # Continue with the rest of the code
+            logger.info("Saving Model")
+            trainer.save_model()
+
+            logger.info("Logging Metrics")
+            metrics = train_result.metrics
+            trainer.log_metrics("train", metrics)
+            trainer.save_metrics("train", metrics)
+
+            logger.info("Saving State")
+            trainer.save_state()
+
+            logger.info("Saving Tokenizer")
+
             logger.info("Saving Model")
             trainer.save_model()
 
@@ -543,14 +645,14 @@ def main():
         if args.do_eval:
             logger.info("*** Evaluate ***")
             metrics = trainer.evaluate()
+            if metrics:
+                perplexity = math.exp(metrics["eval_loss"])
+                metrics["perplexity"] = perplexity
 
-            perplexity = math.exp(metrics["eval_loss"])
-            metrics["perplexity"] = perplexity
+                trainer.log_metrics("eval", metrics)
+                trainer.save_metrics("eval", metrics)
 
-            trainer.log_metrics("eval", metrics)
-            trainer.save_metrics("eval", metrics)
-
-            logger.info(f"Perplexity: {perplexity:.2f}")
+                logger.info(f"Perplexity: {perplexity:.2f}")
 
         # Final analysis of expert utilization
         if args.do_eval:
