@@ -1,4 +1,4 @@
-# RMoE Integration with expertlm
+# RMoE Integration with expertlm (TerraNex)
 
 Author: Sonny Mir  
 Email: sonnym@hotmail.se  
