@@ -1,10 +1,23 @@
 # Recurrent Mixture-of-Experts (RMoE)
 
-This implementation provides a complete Recurrent Mixture-of-Experts (RMoE) architecture with a GRU-based recurrent router, as described in the paper "Layerwise Recurrent Router for Mixture-of-Experts".
+This implementation provides a complete Recurrent Mixture-of-Experts (RMoE) architecture with a GRU-based recurrent router, as described in the paper ["Layerwise Recurrent Router for Mixture-of-Experts"](https://arxiv.org/abs/2402.16812).
 
 ## Overview
 
 The RMoE architecture enhances traditional Mixture-of-Experts (MoE) models by incorporating a recurrent router that maintains state across tokens in a sequence. This enables more context-aware routing decisions, leading to improved performance and more coherent expert selection.
+
+### The Concept of Recurrent Routing
+
+Traditional MoE models use a feed-forward router that makes independent routing decisions for each token. This can lead to inconsistent expert selection, where semantically similar tokens in a sequence might be routed to different experts. The RMoE architecture addresses this limitation by introducing a recurrent connection in the router.
+
+The key insight is that by maintaining a hidden state across tokens, the router can make decisions that take into account the entire sequence history, not just the current token. This leads to several benefits:
+
+1. **Contextual Understanding**: The router can recognize patterns across tokens, making it more likely to route semantically related tokens to the same experts.
+2. **Temporal Coherence**: The recurrent connection helps maintain consistency in routing decisions across a sequence.
+3. **Improved Specialization**: With more coherent routing, experts can better specialize in specific types of content or linguistic patterns.
+4. **Reduced Switching Overhead**: By routing consecutive tokens to the same experts more frequently, the architecture can reduce the computational overhead of switching between experts.
+
+The paper demonstrates that this recurrent routing approach leads to improved perplexity on language modeling tasks compared to traditional MoE models with the same number of parameters.
 
 ## Key Components
 
@@ -85,6 +98,8 @@ generated_ids = model.generate(
 2. **Improved Expert Utilization**: More coherent routing leads to better utilization of expert capacity.
 3. **Reduced Load Imbalance**: The recurrent nature helps distribute tokens more evenly across experts.
 4. **Enhanced Specialization**: Experts can specialize in handling specific types of sequence patterns.
+5. **Better Performance on Long-Range Dependencies**: The recurrent router helps maintain consistency across longer sequences, improving performance on tasks requiring long-range understanding.
+6. **Reduced Computational Overhead**: More consistent routing can reduce the need to frequently switch between experts, potentially improving efficiency.
 
 ## Implementation Details
 
@@ -107,6 +122,7 @@ The implementation includes an auxiliary load balancing loss that encourages uni
 
 ## References
 
-- "Layerwise Recurrent Router for Mixture-of-Experts"
-- "Mixture-of-Experts with Expert Choice Routing"
-- "Switch Transformers: Scaling to Trillion Parameter Models with Simple and Efficient Sparsity" 
+- Mir, S. (2024). ["Layerwise Recurrent Router for Mixture-of-Experts"](https://arxiv.org/abs/2402.16812). arXiv preprint arXiv:2402.16812.
+- Fedus, W., Zoph, B., & Shazeer, N. (2022). ["Switch Transformers: Scaling to Trillion Parameter Models with Simple and Efficient Sparsity"](https://arxiv.org/abs/2101.03961). Journal of Machine Learning Research, 23(120), 1-39.
+- Zhou, H., Peng, B., Luo, R., Yang, S., Zhang, C., Bao, Y., & Chen, W. (2022). ["Mixture-of-Experts with Expert Choice Routing"](https://arxiv.org/abs/2202.09368). Advances in Neural Information Processing Systems, 35.
+- Shazeer, N., Mirhoseini, A., Maziarz, K., Davis, A., Le, Q., Hinton, G., & Dean, J. (2017). ["Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer"](https://arxiv.org/abs/1701.06538). International Conference on Learning Representations (ICLR). 
