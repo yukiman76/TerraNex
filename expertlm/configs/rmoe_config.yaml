@@ -1,0 +1,67 @@
+# Configuration for Recurrent Mixture-of-Experts (RMoE) language model
+
+# Model configuration
+vocab_size: 50257  # GPT-2 vocabulary size
+d_model: 768       # Embedding dimension
+n_layers: 12       # Number of transformer layers
+num_heads: 12      # Number of attention heads
+num_experts: 8     # Number of experts per layer
+ffn_hidden_dim: 3072  # Hidden dimension of feed-forward networks
+max_seq_len: 1024  # Maximum sequence length
+k_experts: 2       # Number of experts to route each token to
+dropout: 0.1       # Dropout probability
+
+# RMoE-specific configuration
+router_type: "gru"  # Type of recurrent cell to use (gru or rnn)
+router_hidden_dim: 256  # Hidden dimension of the router
+add_shared_expert: false  # Whether to add a shared expert
+shared_expert_weight: 0.5  # Weight for the shared expert output
+moe_weight: 0.5  # Weight for the mixture of experts output
+
+# Training configuration
+output_dir: "./output/rmoe"
+overwrite_output_dir: true
+num_train_epochs: 3
+per_device_train_batch_size: 8
+per_device_eval_batch_size: 8
+gradient_accumulation_steps: 4
+learning_rate: 5e-5
+weight_decay: 0.01
+warmup_steps: 500
+logging_dir: "./logs/rmoe"
+logging_steps: 10
+save_steps: 500
+save_total_limit: 2
+evaluation_strategy: "steps"
+eval_steps: 500
+load_best_model_at_end: true
+metric_for_best_model: "eval_loss"
+greater_is_better: false
+fp16: true
+fp16_opt_level: "O1"
+dataloader_num_workers: 4
+report_to: ["tensorboard"]
+run_name: "rmoe-run"
+use_gradient_checkpointing: true
+
+# Data configuration
+data:
+  dataset_name: "wikitext"
+  dataset_config_name: "wikitext-103-raw-v1"
+  text_column_name: "text"
+  preprocessing_num_workers: 4
+  overwrite_cache: false
+  validation_split_percentage: 5
+
+# Tokenizer configuration
+tokenizer: "gpt2"
+
+# Logging configuration
+logging:
+  mlflow:
+    enabled: true
+    tracking_uri: "http://localhost:5000"
+    experiment_name: "rmoe-experiment"
+    tags:
+      model_type: "rmoe"
+      architecture: "recurrent_moe" 

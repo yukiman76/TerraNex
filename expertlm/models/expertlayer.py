@@ -1,13 +1,14 @@
 """
 File: models/expertlayer.py
-Author: Jeffrey Rivero
-Email: jeff@check-ai.com
-Created: 02/20/2025
-Last Modified: 02/24/2025
-Description: Implements a Mixture-of-Experts (MoE) language model architecture.
-             Includes core components like ExpertLayer, PositionalEncoding,
-             MixtureOfExperts, and the main MoELanguageModel class with
-             generation capabilities.
+Author: Sonny Mir
+Email: sonnym@hotmail.se
+Last Modified: 02/28/2025
+
+Description: Implements a Routing Mixture-of-Experts (RMoE) architecture.
+             Contains the ExpertLayer class which implements a single expert
+             neural network with residual connections, layer normalization,
+             and dropout for robust training. Each expert processes inputs
+             independently based on the router's decisions.
 """
 
 import logging

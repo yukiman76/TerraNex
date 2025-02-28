@@ -1,20 +1,35 @@
 """
 File: models/hierarchicalmixtureofexperts.py
-Author: Jeffrey Rivero
-Email: jeff@check-ai.com
-Created: 02/20/2025
-Last Modified: 02/26/2025
-Description: Implements a Mixture-of-Experts (MoE) language model architecture.
-             Includes core components like ExpertLayer, PositionalEncoding,
-             MixtureOfExperts, and the main MoELanguageModel class with
-             generation capabilities.
+Author: Sonny Mir
+Email: sonnym@hotmail.se
+
+Last Modified: 02/28/2024
+Description: Implements a Hierarchical Mixture-of-Experts (HMoE) language model architecture.
+             This enhanced implementation features a hierarchical structure where experts are
+             organized in multiple layers, allowing for more specialized knowledge capture.
              
-             Performance optimizations:
-             - Vectorized token processing
-             - Expert batching
-             - Improved load balancing
-             - Memory-efficient pruning
-             - Checkpointing for large models
+             This module can be used alongside the Recurrent Mixture-of-Experts (RMoE) 
+             implementation, which enhances routing with GRU-based recurrent connections
+             to maintain state across tokens in a sequence.
+
+             Core Components:
+             - HierarchicalExpertLayer: Manages multiple layers of experts
+             - HybridPositionalEncoding: Combines absolute and relative positional encoding
+             - SpecializedExpertNetwork: Expert networks optimized for specific tasks
+             - Dynamic routing mechanism for expert selection
+
+             Key Enhancements:
+             - Hierarchical expert organization for better specialization
+             - Advanced load balancing with auxiliary loss
+             - Efficient sparse routing with top-k gating
+             - Compatible with RMoE adapter for recurrent routing capabilities
+
+             Performance Features:
+             - Multi-GPU expert sharding
+             - Optimized attention patterns
+             - Cached key/value states
+             - Efficient memory management
+             - Expert batching with local grouping
 """
 
 import logging
@@ -471,11 +486,6 @@ class HierarchicalMixtureOfExperts(nn.Module):
             
             output = x + self.output_norm(self.expert_combiner(combined_output))
             return output, router_logits, aux_loss
-
-        except Exception as e:
-            logger.error(f"Error in HierarchicalMixtureOfExperts forward pass: {str(e)}")
-            raise
-
 
         except Exception as e:
             logger.error(f"Error in HierarchicalMixtureOfExperts forward pass: {str(e)}")

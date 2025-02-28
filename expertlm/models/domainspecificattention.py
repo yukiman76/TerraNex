@@ -1,13 +1,12 @@
 """
 File: models/domainspecificattention.py
-Author: Jeffrey Rivero
-Email: jeff@check-ai.com
-Created: 02/20/2025
-Last Modified: 02/24/2025
-Description: Implements a Mixture-of-Experts (MoE) language model architecture.
+Author: Sonny Mir
+Email: sonnym@hotmail.se
+Last Modified: 02/28/2025
+Description: Implements a Routing Mixture-of-Experts (RMoE) language model architecture.
              Includes core components like ExpertLayer, PositionalEncoding,
-             MixtureOfExperts, and the main MoELanguageModel class with
-             generation capabilities.
+             RoutingMixtureOfExperts, and the main RMoELanguageModel class with
+             generation capabilities and dynamic expert routing.
 """
 
 import logging

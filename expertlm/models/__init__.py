@@ -10,6 +10,11 @@ from expertlm.models.expertlayer import ExpertLayer
 from expertlm.models.domainspecificattention import DomainSpecificAttention
 from expertlm.models.positionalencoding import PositionalEncoding
 from expertlm.models.specializedexpertnetwork import SpecializedExpertNetwork
+from expertlm.models.recurrent_moe_integration import (
+    RMoEAdapter,
+    RecurrentMoELanguageModelAdapter,
+    create_rmoe_config_from_dict,
+)
 
 __all__ = [
     'HybridPositionalEncoding',
@@ -19,4 +24,7 @@ __all__ = [
     'DomainSpecificAttention',
     'PositionalEncoding',
     'SpecializedExpertNetwork',
+    'RMoEAdapter',
+    'RecurrentMoELanguageModelAdapter',
+    'create_rmoe_config_from_dict',
 ]
