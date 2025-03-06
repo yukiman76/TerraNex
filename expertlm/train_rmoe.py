@@ -188,10 +188,12 @@ def validate_config(config: dict) -> None:
 
 
 class ExpertMonitor:
-    def __init__(self):
+    def __init__(self, k_experts=8, num_experts=12):
         self.expert_usage = defaultdict(int)
         self.total_tokens = 0
         self.aux_losses = []
+        self.k_experts = k_experts
+        self.num_experts = num_experts
 
     def update(self, router_logits: torch.Tensor, loss: torch.Tensor, model: nn.Module):
         """
@@ -207,10 +209,10 @@ class ExpertMonitor:
         # Count expert usage
         for layer_logits in router_logits:
             # Get top-k experts for each token
-            _, indices = torch.topk(layer_logits, k=model.k_experts, dim=-1)
+            _, indices = torch.topk(layer_logits, k=self.k_experts, dim=-1)
 
             # Count usage
-            for expert_idx in range(model.num_experts):
+            for expert_idx in range(self.num_experts):
                 mask = indices == expert_idx
                 self.expert_usage[expert_idx] += mask.sum().item()
 
@@ -395,7 +397,8 @@ def main():
         training_args = config_to_args(config)
 
         # Create expert monitor
-        expert_monitor = ExpertMonitor()
+        expert_monitor = ExpertMonitor(k_experts=config["k_experts"],
+                                       num_experts=config["num_experts"])
 
         # Create trainer
         trainer = ExpertBalancingTrainer(
