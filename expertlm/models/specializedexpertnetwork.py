@@ -19,7 +19,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint
 from expertlm.models.domainspecificattention import DomainSpecificAttention
-from expertlm.models.hybridpositionalencoding import  HybridPositionalEncoding
+from expertlm.models.hybridpositionalencoding import HybridPositionalEncoding
 from expertlm.models.expertlayer import ExpertLayer
 
 # Configure logging

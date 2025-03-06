@@ -1,0 +1,39 @@
+{
+  "config": {
+    "vocab_size": 32000,
+    "d_model": 256,
+    "n_layers": 2,
+    "num_experts": 8,
+    "ffn_hidden_dim": 1024,
+    "num_heads": 8,
+    "max_seq_len": 512,
+    "k_experts": 2
+  },
+  "total_parameters": 58704208,
+  "parameter_distribution": {
+    "Token Embedding": {
+      "count": 8192000,
+      "percentage": 13.954706620009249
+    },
+    "Other": {
+      "count": 134656,
+      "percentage": 0.22938049006640204
+    },
+    "Router": {
+      "count": 543760,
+      "percentage": 0.9262709071894812
+    },
+    "Self-Attention": {
+      "count": 1052672,
+      "percentage": 1.7931798006711888
+    },
+    "MoE FFN": {
+      "count": 40557120,
+      "percentage": 69.08724498932001
+    },
+    "Output Projection": {
+      "count": 8224000,
+      "percentage": 14.009217192743662
+    }
+  }
+}

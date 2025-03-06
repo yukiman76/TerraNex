@@ -25,6 +25,7 @@ Last Modified: Feb 28, 2024
 import logging
 import math
 from typing import Optional, Tuple, Dict, List, Union
+from collections import namedtuple
 
 import torch
 import torch.nn as nn
@@ -214,6 +215,50 @@ class RecurrentMoELanguageModel(nn.Module):
         """Set the input embeddings."""
         self.token_embedding = embeddings
     
+    def calculate_loss(self, logits, labels):
+        """
+        Calculate the loss with robust handling of out-of-range labels.
+        
+        Args:
+            logits: Model logits of shape (batch_size, seq_len, vocab_size)
+            labels: Label tensor of shape (batch_size, seq_len)
+            
+        Returns:
+            Loss tensor
+        """
+        # Shift so that tokens < n predict n
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous()
+        
+        # Ensure all labels are within the valid range [0, vocab_size-1]
+        # Create a mask for invalid labels
+        invalid_mask = (shift_labels < 0) | (shift_labels >= self.vocab_size)
+        
+        if invalid_mask.any():
+            # Replace invalid labels with padding token
+            shift_labels = shift_labels.clone()
+            shift_labels[invalid_mask] = self.pad_token_id
+        
+        # Create a mask to ignore padding tokens
+        padding_mask = (shift_labels != self.pad_token_id)
+        
+        # Flatten the tokens
+        loss_fct = nn.CrossEntropyLoss(ignore_index=self.pad_token_id, reduction='none')
+        flat_logits = shift_logits.view(-1, self.vocab_size)
+        flat_labels = shift_labels.view(-1)
+        
+        # Calculate per-token loss
+        per_token_loss = loss_fct(flat_logits, flat_labels)
+        
+        # Reshape per-token loss to match the input shape and apply padding mask
+        per_token_loss = per_token_loss.view(shift_labels.size())
+        masked_loss = per_token_loss * padding_mask.float()
+        
+        # Average the loss over non-padding tokens
+        loss = masked_loss.sum() / max(padding_mask.sum().float(), 1.0)
+        
+        return loss
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -242,11 +287,16 @@ class RecurrentMoELanguageModel(nn.Module):
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids)
         
-        # Create causal mask for self-attention
+        # Create causal mask for self-attention (with same dtype as attention_mask)
+        mask_dtype = attention_mask.dtype
         causal_mask = torch.triu(
-            torch.ones((seq_length, seq_length), device=device) * float("-inf"),
+            torch.ones((seq_length, seq_length), device=device, dtype=mask_dtype) * float("-inf"),
             diagonal=1,
         )
+        
+        # Ensure key_padding_mask has the right format
+        # MultiheadAttention expects key_padding_mask where True means to mask
+        key_padding_mask = (1 - attention_mask).to(torch.bool)
         
         # Embed tokens and add positional encoding
         hidden_states = self.token_embedding(input_ids)
@@ -268,24 +318,28 @@ class RecurrentMoELanguageModel(nn.Module):
             residual = hidden_states
             hidden_states = attention_norm(hidden_states)
             
-            # Prepare attention mask
-            extended_attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
-            extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
-            
             if self.use_gradient_checkpointing and self.training:
-                # Custom forward for gradient checkpointing
+                # Custom forward with explicit use_reentrant=False
                 def create_custom_forward(module):
                     def custom_forward(*inputs):
-                        return module(*inputs)
+                        # Explicitly unpack the inputs
+                        query, key, value, attn_mask, key_padding_mask = inputs
+                        return module(
+                            query, key, value, 
+                            attn_mask=attn_mask,
+                            key_padding_mask=key_padding_mask
+                        )
                     return custom_forward
                 
+                # Use checkpoint with use_reentrant=False
                 attn_output, _ = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(attention),
-                    hidden_states,
-                    hidden_states,
-                    hidden_states,
-                    causal_mask,
-                    None,
+                    hidden_states,  # query
+                    hidden_states,  # key
+                    hidden_states,  # value
+                    causal_mask,    # attn_mask
+                    key_padding_mask,  # key_padding_mask
+                    use_reentrant=False,
                 )
             else:
                 attn_output, _ = attention(
@@ -293,7 +347,7 @@ class RecurrentMoELanguageModel(nn.Module):
                     hidden_states,
                     hidden_states,
                     attn_mask=causal_mask,
-                    key_padding_mask=(1 - attention_mask).bool(),
+                    key_padding_mask=key_padding_mask,
                 )
             
             hidden_states = residual + attn_output
@@ -302,14 +356,21 @@ class RecurrentMoELanguageModel(nn.Module):
             if self.use_gradient_checkpointing and self.training:
                 def create_custom_forward(module):
                     def custom_forward(*inputs):
-                        return module(*inputs)
+                        hidden_state, router_state, output_logits = inputs
+                        return module(
+                            hidden_state,
+                            router_hidden_state=router_state,
+                            output_router_logits=output_logits,
+                        )
                     return custom_forward
                 
+                # Use checkpoint with use_reentrant=False
                 hidden_states, router_logits, router_hidden_states[i], layer_aux_loss = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(moe_block),
                     hidden_states,
                     router_hidden_states[i],
                     return_router_logits,
+                    use_reentrant=False,
                 )
             else:
                 hidden_states, router_logits, router_hidden_states[i], layer_aux_loss = moe_block(
@@ -334,30 +395,28 @@ class RecurrentMoELanguageModel(nn.Module):
         # Calculate loss if labels are provided
         loss = None
         if labels is not None:
-            # Shift so that tokens < n predict n
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            
-            # Flatten the tokens
-            loss_fct = nn.CrossEntropyLoss(ignore_index=self.pad_token_id)
-            loss = loss_fct(shift_logits.view(-1, self.vocab_size), shift_labels.view(-1))
+            print("calculate_loss")
+            loss = self.calculate_loss(logits, labels)
+            print(f"calculate_loss {loss}")
             
             # Add auxiliary loss
             if self.router_aux_loss_coef > 0:
                 loss = loss + self.router_aux_loss_coef * aux_loss
         
-        # Prepare outputs
-        outputs = {
-            "logits": logits,
-            "loss": loss,
-        }
-        
-        if return_router_logits:
-            outputs["router_logits"] = all_router_logits
-            outputs["aux_loss"] = aux_loss
+
+        Output = namedtuple(
+            "Output", ["loss", "logits", "router_logits", "capacity_loss"]
+        )
+
+        outputs = Output(
+            loss=loss if labels is not None else None,
+            logits=logits,
+            router_logits=all_router_logits if return_router_logits else None,
+            capacity_loss=aux_loss if return_router_logits else None,
+        )
         
         return outputs
-    
+
     def generate(
         self,
         input_ids: torch.Tensor,
@@ -417,12 +476,9 @@ class RecurrentMoELanguageModel(nn.Module):
                 
                 # Apply top-k filtering
                 if top_k > 0:
-                    indices_to_remove = torch.topk(next_token_logits, k=top_k, dim=-1)[0][:, -1].unsqueeze(-1)
-                    next_token_logits = torch.where(
-                        next_token_logits < indices_to_remove,
-                        torch.ones_like(next_token_logits) * float("-inf"),
-                        next_token_logits,
-                    )
+                    top_k_values, _ = torch.topk(next_token_logits, k=top_k, dim=-1)
+                    indices_to_remove = next_token_logits < top_k_values[:, -1].unsqueeze(-1)
+                    next_token_logits = next_token_logits.masked_fill(indices_to_remove, -float("inf"))
                 
                 # Apply top-p (nucleus) filtering
                 if top_p < 1.0:
@@ -439,11 +495,7 @@ class RecurrentMoELanguageModel(nn.Module):
                     indices_to_remove = sorted_indices_to_remove.scatter(
                         dim=1, index=sorted_indices, src=sorted_indices_to_remove
                     )
-                    next_token_logits = torch.where(
-                        indices_to_remove,
-                        torch.ones_like(next_token_logits) * float("-inf"),
-                        next_token_logits,
-                    )
+                    next_token_logits = next_token_logits.masked_fill(indices_to_remove, -float("inf"))
                 
                 # Sample or greedy decode
                 if do_sample:
@@ -464,4 +516,4 @@ class RecurrentMoELanguageModel(nn.Module):
                 if eos_token_id is not None and (next_tokens == eos_token_id).all():
                     break
         
-        return input_ids 
+        return input_ids

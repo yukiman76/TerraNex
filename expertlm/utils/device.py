@@ -1,5 +1,5 @@
 """
-File: device.py
+File: utils/device.py
 Author: Jeffrey Rivero
 Email: jeff@check-ai.com
 Created: 02/20/2025

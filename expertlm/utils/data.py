@@ -212,36 +212,37 @@ class CustomDataCollator:
             max_length = max(len(x["input_ids"]) for x in features)
             batch_size = len(features)
             
-            # Pre-allocate tensors on the right device
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+            # Pre-allocate tensors on CPU (NOT on device)
             batch = {
                 "input_ids": torch.full(
                     (batch_size, max_length), 
                     self.pad_token_id, 
-                    dtype=torch.long,
-                    device=device
+                    dtype=torch.long
                 ),
                 "attention_mask": torch.zeros(
                     (batch_size, max_length), 
-                    dtype=torch.long,
-                    device=device
+                    dtype=torch.long
                 ),
                 "labels": torch.full(
                     (batch_size, max_length), 
                     -100, 
-                    dtype=torch.long,
-                    device=device
+                    dtype=torch.long
                 )
             }
             
             # Fill tensors efficiently
             for i, feature in enumerate(features):
-                input_ids = torch.tensor(feature["input_ids"], dtype=torch.long)
+                # Make sure we're working with lists, not tensors
+                input_ids = feature["input_ids"]
+                if isinstance(input_ids, torch.Tensor):
+                    input_ids = input_ids.tolist()
+                    
                 length = len(input_ids)
                 
-                batch["input_ids"][i, :length] = input_ids
+                # Copy data without creating new tensors
+                batch["input_ids"][i, :length] = torch.tensor(input_ids, dtype=torch.long)
                 batch["attention_mask"][i, :length] = 1
-                batch["labels"][i, :length] = input_ids
+                batch["labels"][i, :length] = torch.tensor(input_ids, dtype=torch.long)
                 
             return batch
             

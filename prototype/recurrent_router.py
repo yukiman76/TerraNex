@@ -261,8 +261,12 @@ class RecurrentRouter(nn.Module):
         mean_prob_per_expert = router_probs.mean(dim=[0, 1])
         
         # Calculate coefficient of variation (ideal is 1/num_experts for each expert)
-        ideal_prob = 1.0 / self.num_experts
-        expert_imbalance = torch.sum(mean_prob_per_expert * torch.log(mean_prob_per_expert + 1e-10) + 
-                                    torch.log(ideal_prob + 1e-10) * ideal_prob)
+        ideal_prob = torch.tensor(1.0 / self.num_experts, device=router_probs.device)
         
-        return expert_imbalance 
+        # Use elementwise log and then sum to avoid applying log to a scalar
+        expert_imbalance = torch.sum(
+            mean_prob_per_expert * torch.log(mean_prob_per_expert + 1e-10) + 
+            ideal_prob * torch.log(ideal_prob + 1e-10)
+        )
+        
+        return expert_imbalance

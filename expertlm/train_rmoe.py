@@ -128,7 +128,7 @@ def config_to_args(config):
         output_dir=config.get("output_dir", "./output"),
         overwrite_output_dir=config.get("overwrite_output_dir", True),
         num_train_epochs=config.get("num_train_epochs", 3),
-        per_device_train_batch_size=config.get("per_device_train_batch_size", 8),
+        per_device_train_batch_size=8, #config.get("per_device_train_batch_size", 8),
         per_device_eval_batch_size=config.get("per_device_eval_batch_size", 8),
         gradient_accumulation_steps=config.get("gradient_accumulation_steps", 1),
         learning_rate=config.get("learning_rate", 5e-5),
@@ -138,14 +138,15 @@ def config_to_args(config):
         logging_steps=config.get("logging_steps", 10),
         save_steps=config.get("save_steps", 500),
         save_total_limit=config.get("save_total_limit", 2),
-        evaluation_strategy=config.get("evaluation_strategy", "steps"),
+        eval_strategy=config.get("evaluation_strategy", "steps"),
         eval_steps=config.get("eval_steps", 500),
         load_best_model_at_end=config.get("load_best_model_at_end", True),
         metric_for_best_model=config.get("metric_for_best_model", "eval_loss"),
         greater_is_better=config.get("greater_is_better", False),
         fp16=config.get("fp16", False),
         fp16_opt_level=config.get("fp16_opt_level", "O1"),
-        dataloader_num_workers=config.get("dataloader_num_workers", 4),
+        dataloader_num_workers=0, #config.get("dataloader_num_workers", 4),
+        dataloader_pin_memory=False, 
         report_to=config.get("report_to", ["tensorboard"]),
         run_name=config.get("run_name", "rmoe-run"),
     )
@@ -260,7 +261,7 @@ def main():
     """
     parser = argparse.ArgumentParser(description="Train a Recurrent MoE Language Model")
     parser.add_argument(
-        "--config", type=str, required=True, help="Path to configuration file"
+        "--config_file", type=str, required=True, help="Path to configuration file"
     )
     parser.add_argument(
         "--local_rank", type=int, default=-1, help="Local rank for distributed training"
@@ -278,7 +279,7 @@ def main():
         set_seed(args.seed)
         
         # Load configuration
-        config = load_config(args.config)
+        config = load_config(args.config_file)
         
         # Add RMoE-specific parameters if not present
         if "router_type" not in config:
@@ -293,10 +294,10 @@ def main():
             config["moe_weight"] = 0.5
         
         # Setup device
-        device, n_gpu = setup_device(args.local_rank)
+        device_info = setup_device(args.local_rank)
         
         # Log device information
-        log_device_info(device, n_gpu)
+        log_device_info(device_info)
         
         # Optimize CUDA performance if available
         if torch.cuda.is_available():
@@ -326,23 +327,27 @@ def main():
             config["vocab_size"] = len(tokenizer)
         
         # Create data configuration
+        # TODO: fixme
         data_config = DataConfig(
             dataset_name=config.get("data", {}).get("dataset_name", "wikitext"),
             dataset_config_name=config.get("data", {}).get("dataset_config_name", "wikitext-103-raw-v1"),
-            text_column_name=config.get("data", {}).get("text_column_name", "text"),
+            # text_column_name=config.get("data", {}).get("text_column_name", "text"),
             max_seq_length=config.get("max_seq_len", 1024),
             preprocessing_num_workers=config.get("data", {}).get("preprocessing_num_workers", 4),
             overwrite_cache=config.get("data", {}).get("overwrite_cache", False),
             validation_split_percentage=config.get("data", {}).get("validation_split_percentage", 5),
-            block_size=config.get("data", {}).get("block_size", None),
+            # block_size=config.get("data", {}).get("block_size", None),
         )
         
         # Load and prepare datasets
-        train_dataset, eval_dataset = load_and_prepare_datasets(
+        processed_datasets = load_and_prepare_datasets(
             tokenizer=tokenizer,
             data_config=data_config,
         )
-        
+
+        train_dataset = processed_datasets['train']
+        eval_dataset = processed_datasets.get('test', None) 
+
         # Create model
         logger.info("Creating RecurrentMoELanguageModelAdapter")
         model = RecurrentMoELanguageModelAdapter(
@@ -365,7 +370,7 @@ def main():
         )
         
         # Move model to device
-        model = model.to(device)
+        model = model.to(device_info.device)
         
         # Log model size
         num_params = sum(p.numel() for p in model.parameters())
@@ -374,10 +379,11 @@ def main():
             mlflow.log_param("num_parameters", num_params)
         
         # Create data collator
+        # TODO: fixme
         data_collator = CustomDataCollator(
             tokenizer=tokenizer,
-            mlm=False,
-            mlm_probability=0.15,
+            # mlm=False,
+            # mlm_probability=0.15,
         )
         
         # Create training arguments
@@ -392,10 +398,11 @@ def main():
             args=training_args,
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
-            tokenizer=tokenizer,
+            processing_class=tokenizer,
             data_collator=data_collator,
             expert_monitor=expert_monitor,
         )
+
         
         # Enable profiling if requested
         if args.profile:
@@ -409,6 +416,8 @@ def main():
                 repeat=1,
             )
             
+
+            # TODO: fixme add MPS
             profiler_activities = [
                 ProfilerActivity.CPU,
                 ProfilerActivity.CUDA if torch.cuda.is_available() else None,
@@ -484,4 +493,5 @@ def main():
 
 
 if __name__ == "__main__":
+    mp.set_start_method('spawn', force=True)
     main() 

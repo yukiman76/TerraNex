@@ -1,7 +1,6 @@
 """
 File: models/positionalencoding.py
-Author: Jeffrey Rivero
-Email: jeff@check-ai.com
+Authors: Jeffrey Rivero (jeff@check-ai.com),  Sonny Mir (sonnym@hotmail.se)
 Created: 02/20/2025
 Last Modified: 02/24/2025
 Description: Implements a Mixture-of-Experts (MoE) language model architecture.

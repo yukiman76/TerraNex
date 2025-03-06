@@ -82,6 +82,7 @@ class ExpertBalancingTrainer(Trainer):
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         outputs = model(**inputs, return_router_logits=True)
+        print(outputs)
         loss = outputs.loss
         
         # Track expert usage with monitor if available

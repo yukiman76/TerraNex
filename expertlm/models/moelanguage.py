@@ -166,9 +166,9 @@ class MoELanguageModel(nn.Module):
             if attention_mask is None:
                 attention_mask = torch.ones(batch_size, seq_len, device=x.device)
 
-            causal_mask = torch.triu(
-                torch.ones(seq_len, seq_len, device=x.device), diagonal=1
-            ).bool()
+            # causal_mask = torch.triu(
+            #     torch.ones(seq_len, seq_len, device=x.device), diagonal=1
+            # ).bool()
 
             padding_mask = attention_mask.float()
             key_padding_mask = (
