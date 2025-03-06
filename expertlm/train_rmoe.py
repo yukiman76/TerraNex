@@ -3,7 +3,7 @@ File: train_rmoe.py
 Description: Training script for the Recurrent Mixture-of-Experts (RMoE) language model.
              This script is a modified version of train.py that uses the RMoE implementation
              from the prototype folder.
-             
+
              Key features:
              - Implements training for models with GRU-based recurrent routers
              - Tracks expert usage and load balancing metrics during training
@@ -33,22 +33,23 @@ from transformers import (
     set_seed,
     TrainingArguments,
 )
-from datasets import load_dataset
 import yaml
 import mlflow
-import os
-from torch.profiler import profile, ProfilerActivity, record_function, tensorboard_trace_handler
+from torch.profiler import ProfilerActivity, tensorboard_trace_handler
 
 # Import our RMoE model
-from expertlm.models import RecurrentMoELanguageModelAdapter, create_rmoe_config_from_dict
+from expertlm.models import RecurrentMoELanguageModelAdapter
 
 from expertlm.utils.device import (
     setup_device,
     optimize_cuda_performance,
-    get_device_map,
     log_device_info,
 )
-from expertlm.utils.data import load_and_prepare_datasets, DataConfig, CustomDataCollator
+from expertlm.utils.data import (
+    load_and_prepare_datasets,
+    DataConfig,
+    CustomDataCollator,
+)
 from expertlm.utils.moe_trainer import ExpertBalancingTrainer
 
 # Set up logging
@@ -128,7 +129,7 @@ def config_to_args(config):
         output_dir=config.get("output_dir", "./output"),
         overwrite_output_dir=config.get("overwrite_output_dir", True),
         num_train_epochs=config.get("num_train_epochs", 3),
-        per_device_train_batch_size=8, #config.get("per_device_train_batch_size", 8),
+        per_device_train_batch_size=8,  # config.get("per_device_train_batch_size", 8),
         per_device_eval_batch_size=config.get("per_device_eval_batch_size", 8),
         gradient_accumulation_steps=config.get("gradient_accumulation_steps", 1),
         learning_rate=config.get("learning_rate", 5e-5),
@@ -145,8 +146,8 @@ def config_to_args(config):
         greater_is_better=config.get("greater_is_better", False),
         fp16=config.get("fp16", False),
         fp16_opt_level=config.get("fp16_opt_level", "O1"),
-        dataloader_num_workers=0, #config.get("dataloader_num_workers", 4),
-        dataloader_pin_memory=False, 
+        dataloader_num_workers=0,  # config.get("dataloader_num_workers", 4),
+        dataloader_pin_memory=False,
         report_to=config.get("report_to", ["tensorboard"]),
         run_name=config.get("run_name", "rmoe-run"),
     )
@@ -207,12 +208,12 @@ class ExpertMonitor:
         for layer_logits in router_logits:
             # Get top-k experts for each token
             _, indices = torch.topk(layer_logits, k=model.k_experts, dim=-1)
-            
+
             # Count usage
             for expert_idx in range(model.num_experts):
-                mask = (indices == expert_idx)
+                mask = indices == expert_idx
                 self.expert_usage[expert_idx] += mask.sum().item()
-            
+
             # Count total tokens
             self.total_tokens += layer_logits.shape[0] * layer_logits.shape[1]
 
@@ -221,12 +222,12 @@ class ExpertMonitor:
         Get expert usage metrics
         """
         metrics = {}
-        
+
         # Expert usage percentages
         if self.total_tokens > 0:
             for expert_idx, count in self.expert_usage.items():
                 metrics[f"expert_{expert_idx}_usage"] = count / self.total_tokens
-        
+
         # Expert usage entropy
         if self.expert_usage:
             total = sum(self.expert_usage.values())
@@ -234,11 +235,11 @@ class ExpertMonitor:
                 probs = [count / total for count in self.expert_usage.values()]
                 entropy = -sum(p * math.log(p) if p > 0 else 0 for p in probs)
                 metrics["expert_entropy"] = entropy
-        
+
         # Average auxiliary loss
         if self.aux_losses:
             metrics["avg_aux_loss"] = sum(self.aux_losses) / len(self.aux_losses)
-        
+
         return metrics
 
 
@@ -249,7 +250,7 @@ def cleanup_resources():
     # Clean up CUDA resources
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-        
+
     # Close MLflow run if active
     if mlflow.active_run():
         mlflow.end_run()
@@ -269,18 +270,16 @@ def main():
     parser.add_argument(
         "--seed", type=int, default=42, help="Random seed for reproducibility"
     )
-    parser.add_argument(
-        "--profile", action="store_true", help="Enable profiling"
-    )
+    parser.add_argument("--profile", action="store_true", help="Enable profiling")
     args = parser.parse_args()
 
     try:
         # Set random seed
         set_seed(args.seed)
-        
+
         # Load configuration
         config = load_config(args.config_file)
-        
+
         # Add RMoE-specific parameters if not present
         if "router_type" not in config:
             config["router_type"] = "gru"
@@ -292,61 +291,67 @@ def main():
             config["shared_expert_weight"] = 0.5
         if "moe_weight" not in config:
             config["moe_weight"] = 0.5
-        
+
         # Setup device
         device_info = setup_device(args.local_rank)
-        
+
         # Log device information
         log_device_info(device_info)
-        
+
         # Optimize CUDA performance if available
         if torch.cuda.is_available():
             optimize_cuda_performance()
-        
+
         # Setup MLflow tracking
         mlflow_run = setup_mlflow(config)
-        
+
         # Log configuration
         logger.info(f"Configuration: {json.dumps(config, indent=2)}")
         if mlflow_run:
             mlflow.log_params(config)
-        
+
         # Create tokenizer
         tokenizer_name = config.get("tokenizer", "gpt2")
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-        
+
         # Add padding token if not present
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
-        
+
         # Update vocab size in config if needed
         if config.get("vocab_size", 0) != len(tokenizer):
             logger.warning(
                 f"Updating vocab_size in config from {config.get('vocab_size')} to {len(tokenizer)}"
             )
             config["vocab_size"] = len(tokenizer)
-        
+
         # Create data configuration
         # TODO: fixme
         data_config = DataConfig(
             dataset_name=config.get("data", {}).get("dataset_name", "wikitext"),
-            dataset_config_name=config.get("data", {}).get("dataset_config_name", "wikitext-103-raw-v1"),
+            dataset_config_name=config.get("data", {}).get(
+                "dataset_config_name", "wikitext-103-raw-v1"
+            ),
             # text_column_name=config.get("data", {}).get("text_column_name", "text"),
             max_seq_length=config.get("max_seq_len", 1024),
-            preprocessing_num_workers=config.get("data", {}).get("preprocessing_num_workers", 4),
+            preprocessing_num_workers=config.get("data", {}).get(
+                "preprocessing_num_workers", 4
+            ),
             overwrite_cache=config.get("data", {}).get("overwrite_cache", False),
-            validation_split_percentage=config.get("data", {}).get("validation_split_percentage", 5),
+            validation_split_percentage=config.get("data", {}).get(
+                "validation_split_percentage", 5
+            ),
             # block_size=config.get("data", {}).get("block_size", None),
         )
-        
+
         # Load and prepare datasets
         processed_datasets = load_and_prepare_datasets(
             tokenizer=tokenizer,
             data_config=data_config,
         )
 
-        train_dataset = processed_datasets['train']
-        eval_dataset = processed_datasets.get('test', None) 
+        train_dataset = processed_datasets["train"]
+        eval_dataset = processed_datasets.get("test", None)
 
         # Create model
         logger.info("Creating RecurrentMoELanguageModelAdapter")
@@ -368,16 +373,16 @@ def main():
             use_gradient_checkpointing=config.get("use_gradient_checkpointing", False),
             pad_token_id=tokenizer.pad_token_id,
         )
-        
+
         # Move model to device
         model = model.to(device_info.device)
-        
+
         # Log model size
         num_params = sum(p.numel() for p in model.parameters())
         logger.info(f"Model size: {num_params / 1e6:.2f}M parameters")
         if mlflow_run:
             mlflow.log_param("num_parameters", num_params)
-        
+
         # Create data collator
         # TODO: fixme
         data_collator = CustomDataCollator(
@@ -385,13 +390,13 @@ def main():
             # mlm=False,
             # mlm_probability=0.15,
         )
-        
+
         # Create training arguments
         training_args = config_to_args(config)
-        
+
         # Create expert monitor
         expert_monitor = ExpertMonitor()
-        
+
         # Create trainer
         trainer = ExpertBalancingTrainer(
             model=model,
@@ -403,11 +408,10 @@ def main():
             expert_monitor=expert_monitor,
         )
 
-        
         # Enable profiling if requested
         if args.profile:
             logger.info("Enabling profiling")
-            
+
             # Create profiler
             profiler_schedule = torch.profiler.schedule(
                 wait=1,
@@ -415,7 +419,6 @@ def main():
                 active=3,
                 repeat=1,
             )
-            
 
             # TODO: fixme add MPS
             profiler_activities = [
@@ -423,7 +426,7 @@ def main():
                 ProfilerActivity.CUDA if torch.cuda.is_available() else None,
             ]
             profiler_activities = [a for a in profiler_activities if a is not None]
-            
+
             profiler = torch.profiler.profile(
                 activities=profiler_activities,
                 schedule=profiler_schedule,
@@ -434,64 +437,64 @@ def main():
                 profile_memory=True,
                 with_stack=True,
             )
-            
+
             # Define profiling function
             def profile_training():
                 with profiler:
                     trainer.train()
-            
+
             # Create profiler callback
             from transformers.trainer_callback import TrainerCallback
-            
+
             class ProfilerCallback(TrainerCallback):
                 def __init__(self, profiler):
                     self.profiler = profiler
-                
+
                 def on_step_end(self, args, state, control, **kwargs):
                     self.profiler.step()
-            
+
             # Add profiler callback
             trainer.add_callback(ProfilerCallback(profiler))
-            
+
             # Train with profiling
             profile_training()
         else:
             # Train without profiling
             trainer.train()
-        
+
         # Save model
         trainer.save_model(training_args.output_dir)
-        
+
         # Save tokenizer
         tokenizer.save_pretrained(training_args.output_dir)
-        
+
         # Save configuration
         with open(os.path.join(training_args.output_dir, "config.json"), "w") as f:
             json.dump(config, f, indent=2)
-        
+
         # Log metrics
         metrics = trainer.evaluate()
         logger.info(f"Evaluation metrics: {metrics}")
         if mlflow_run:
             mlflow.log_metrics(metrics)
-        
+
         # Log expert usage metrics
         expert_metrics = expert_monitor.get_metrics()
         logger.info(f"Expert usage metrics: {expert_metrics}")
         if mlflow_run:
             mlflow.log_metrics(expert_metrics)
-        
+
         logger.info("Training completed successfully")
-    
+
     except Exception as e:
         logger.exception(f"Error during training: {str(e)}")
         raise
-    
+
     finally:
         # Clean up resources
         cleanup_resources()
 
 
 if __name__ == "__main__":
-    mp.set_start_method('spawn', force=True)
-    main() 
+    mp.set_start_method("spawn", force=True)
+    main()

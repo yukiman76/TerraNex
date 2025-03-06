@@ -3,7 +3,7 @@ File: models/recurrent_moe_integration.py
 Description: Integration module for the Recurrent Mixture-of-Experts (RMoE) architecture
              with the expertlm codebase. Provides adapter classes and utility functions
              to use the RMoE implementation from the prototype folder.
-             
+
              This module implements a GRU-based recurrent router that maintains state
              across tokens in a sequence, enabling context-aware routing decisions.
              The recurrent nature of the router allows it to consider the history of
@@ -22,20 +22,26 @@ Reference: "Recurrent Mixture-of-Experts: Adaptive Memory-Augmented Language Mod
 import logging
 import sys
 import os
-from typing import Optional, Tuple, Dict, List, Union
+from typing import Optional, Dict
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
-sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "prototype"))
+sys.path.append(
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "prototype"
+    )
+)
 
 
-from prototype.recurrent_router import RecurrentRouter
-from prototype.recurrent_moe import RecurrentMoEBlock
-from prototype.recurrent_moe_language_model import RecurrentMoELanguageModel
-from prototype.config import RecurrentMoEModelConfig, RecurrentMoEConfig, RecurrentRouterConfig
+from expertlm.models.recurrent_moe import RecurrentMoEBlock
+from expertlm.models.recurrent_moe_language_model import RecurrentMoELanguageModel
+from expertlm.utils.rmoe_config import (
+    RecurrentMoEModelConfig,
+    RecurrentMoEConfig,
+    RecurrentRouterConfig,
+)
 
 
 logging.basicConfig(level=logging.INFO)
@@ -47,7 +53,7 @@ class RMoEAdapter(nn.Module):
     Adapter class that wraps the RecurrentMoEBlock to make it compatible with
     the expertlm codebase as a drop-in replacement for HierarchicalMixtureOfExperts.
     """
-    
+
     def __init__(
         self,
         num_experts: int,
@@ -65,7 +71,6 @@ class RMoEAdapter(nn.Module):
         moe_weight: float = 0.5,
     ):
         super().__init__()
-        
 
         self.num_experts = num_experts
         self.input_dim = input_dim
@@ -73,7 +78,7 @@ class RMoEAdapter(nn.Module):
         self.output_dim = output_dim
         self.k = k
         self.load_balance = load_balance
-        
+
         # Create RecurrentMoEBlock
         self.rmoe_block = RecurrentMoEBlock(
             num_experts=num_experts,
@@ -89,17 +94,17 @@ class RMoEAdapter(nn.Module):
             add_bias=False,
             router_aux_loss_coef=0.01 if load_balance else 0.0,
         )
-        
+
         # Initialize router hidden state
         self.router_hidden_state = None
-    
+
     def forward(self, hidden_states: torch.Tensor):
         """
         Forward pass of the RMoE adapter.
-        
+
         Args:
             hidden_states: Input tensor of shape (batch_size, seq_len, input_dim)
-            
+
         Returns:
             Tuple containing:
             - output: Output tensor of shape (batch_size, seq_len, output_dim)
@@ -112,9 +117,9 @@ class RMoEAdapter(nn.Module):
             router_hidden_state=self.router_hidden_state,
             output_router_logits=True,
         )
-        
+
         return output, router_logits, aux_loss
-    
+
     def reset_router_state(self):
         """Reset the router hidden state."""
         self.router_hidden_state = None
@@ -125,7 +130,7 @@ class RecurrentMoELanguageModelAdapter(nn.Module):
     Adapter class that wraps the RecurrentMoELanguageModel to make it compatible
     with the expertlm codebase as a drop-in replacement for MoELanguageModel.
     """
-    
+
     def __init__(
         self,
         vocab_size: int,
@@ -146,9 +151,9 @@ class RecurrentMoELanguageModelAdapter(nn.Module):
         pad_token_id: int = 0,
     ):
         super().__init__()
-        
+
         logger.info("Initializing RecurrentMoELanguageModelAdapter")
-        
+
         # store for latter use
         self.k_experts = k_experts
         self.num_experts = num_experts
@@ -173,9 +178,11 @@ class RecurrentMoELanguageModelAdapter(nn.Module):
             use_gradient_checkpointing=use_gradient_checkpointing,
             pad_token_id=pad_token_id,
         )
-        
-        logger.info(f"Model initialized with {sum(p.numel() for p in self.parameters())} parameters")
-    
+
+        logger.info(
+            f"Model initialized with {sum(p.numel() for p in self.parameters())} parameters"
+        )
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -186,14 +193,14 @@ class RecurrentMoELanguageModelAdapter(nn.Module):
     ):
         """
         Forward pass of the RecurrentMoELanguageModelAdapter.
-        
+
         Args:
             input_ids: Input token IDs of shape (batch_size, seq_len)
             attention_mask: Attention mask of shape (batch_size, seq_len)
             labels: Optional labels for computing loss
             return_router_logits: Whether to return router logits
             use_cache: Whether to use caching for generation
-            
+
         Returns:
             Dictionary containing model outputs
         """
@@ -206,7 +213,7 @@ class RecurrentMoELanguageModelAdapter(nn.Module):
             return_router_logits=return_router_logits,
             use_cache=use_cache,
         )
-    
+
     def generate(
         self,
         input_ids: torch.Tensor,
@@ -220,7 +227,7 @@ class RecurrentMoELanguageModelAdapter(nn.Module):
     ):
         """
         Generate text using the language model.
-        
+
         Args:
             input_ids: Input token IDs of shape (batch_size, seq_len)
             max_new_tokens: Maximum number of new tokens to generate
@@ -230,7 +237,7 @@ class RecurrentMoELanguageModelAdapter(nn.Module):
             do_sample: Whether to sample or use greedy decoding
             pad_token_id: Padding token ID
             eos_token_id: End of sequence token ID
-            
+
         Returns:
             Generated token IDs
         """
@@ -244,16 +251,16 @@ class RecurrentMoELanguageModelAdapter(nn.Module):
             pad_token_id=pad_token_id,
             eos_token_id=eos_token_id,
         )
-    
+
     @property
     def device(self) -> torch.device:
         """Get the device of the model."""
         return self.model.device
-    
+
     def get_input_embeddings(self):
         """Get the input embeddings."""
         return self.model.get_input_embeddings()
-    
+
     def set_input_embeddings(self, embeddings):
         """Set the input embeddings."""
         self.model.set_input_embeddings(embeddings)
@@ -262,10 +269,10 @@ class RecurrentMoELanguageModelAdapter(nn.Module):
 def create_rmoe_config_from_dict(config_dict: Dict) -> RecurrentMoEModelConfig:
     """
     Create a RecurrentMoEModelConfig from a dictionary.
-    
+
     Args:
         config_dict: Dictionary containing configuration parameters
-        
+
     Returns:
         RecurrentMoEModelConfig instance
     """
@@ -276,7 +283,7 @@ def create_rmoe_config_from_dict(config_dict: Dict) -> RecurrentMoEModelConfig:
         cell_type=config_dict.get("router_type", "gru"),
         dropout=config_dict.get("dropout", 0.1),
     )
-    
+
     # Extract MoE config parameters
     moe_config = RecurrentMoEConfig(
         num_experts=config_dict.get("num_experts", 8),
@@ -289,7 +296,7 @@ def create_rmoe_config_from_dict(config_dict: Dict) -> RecurrentMoEModelConfig:
         add_bias=config_dict.get("add_bias", False),
         router_aux_loss_coef=config_dict.get("router_aux_loss_coef", 0.01),
     )
-    
+
     # Create model config
     model_config = RecurrentMoEModelConfig(
         vocab_size=config_dict.get("vocab_size", 32000),
@@ -304,5 +311,5 @@ def create_rmoe_config_from_dict(config_dict: Dict) -> RecurrentMoEModelConfig:
         bos_token_id=config_dict.get("bos_token_id", 1),
         eos_token_id=config_dict.get("eos_token_id", 2),
     )
-    
-    return model_config 
+
+    return model_config

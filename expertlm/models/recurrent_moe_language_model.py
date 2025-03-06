@@ -32,8 +32,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint
 
-from prototype.recurrent_router import RecurrentRouter
-from prototype.recurrent_moe import RecurrentMoEBlock, ExpertLayer
+from expertlm.models.recurrent_router import RecurrentRouter
+from expertlm.models.recurrent_moe import RecurrentMoEBlock, ExpertLayer
 
 
 # Configure logging

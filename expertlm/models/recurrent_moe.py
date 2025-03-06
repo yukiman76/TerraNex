@@ -27,7 +27,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Tuple, Dict, List
 
-from prototype.recurrent_router import RecurrentRouter, GRURouterCell, RNNRouterCell
+from expertlm.models.recurrent_router import RecurrentRouter, GRURouterCell, RNNRouterCell
 
 
 class ExpertLayer(nn.Module):
