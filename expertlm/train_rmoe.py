@@ -206,7 +206,7 @@ class ExpertMonitor:
         # Count expert usage
         for layer_logits in router_logits:
             # Get top-k experts for each token
-            _, indices = torch.topk(layer_logits, k=model.k, dim=-1)
+            _, indices = torch.topk(layer_logits, k=model.k_experts, dim=-1)
             
             # Count usage
             for expert_idx in range(model.num_experts):

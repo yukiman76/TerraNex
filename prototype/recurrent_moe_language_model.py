@@ -125,7 +125,9 @@ class RecurrentMoELanguageModel(nn.Module):
         super().__init__()
         
         logger.info("Initializing RecurrentMoELanguageModel")
-        
+        # store for latter use
+        self.k_experts = k_experts
+        self.num_experts = num_experts
         # Model dimensions
         self.d_model = d_model
         self.vocab_size = vocab_size
@@ -395,9 +397,9 @@ class RecurrentMoELanguageModel(nn.Module):
         # Calculate loss if labels are provided
         loss = None
         if labels is not None:
-            print("calculate_loss")
+            # print("calculate_loss")
             loss = self.calculate_loss(logits, labels)
-            print(f"calculate_loss {loss}")
+            # print(f"calculate_loss {loss}")
             
             # Add auxiliary loss
             if self.router_aux_loss_coef > 0:

@@ -149,6 +149,9 @@ class RecurrentMoELanguageModelAdapter(nn.Module):
         
         logger.info("Initializing RecurrentMoELanguageModelAdapter")
         
+        # store for latter use
+        self.k_experts = k_experts
+        self.num_experts = num_experts
         # Create RecurrentMoELanguageModel
         self.model = RecurrentMoELanguageModel(
             vocab_size=vocab_size,
@@ -194,8 +197,8 @@ class RecurrentMoELanguageModelAdapter(nn.Module):
         Returns:
             Dictionary containing model outputs
         """
-        print(f"Adapter received input_ids shape: {input_ids.shape}")
-        print(f"Adapter received attention_mask shape: {attention_mask.shape}")
+        # print(f"Adapter received input_ids shape: {input_ids.shape}")
+        # print(f"Adapter received attention_mask shape: {attention_mask.shape}")
         return self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
